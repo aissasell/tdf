@@ -384,7 +384,7 @@ async fn inner_main() -> Result<(), WrappedErr> {
 	}
 
 	let fullscreen = flags.fullscreen;
-	let main_area = Tui::main_layout(&term.get_frame(), fullscreen);
+	let main_area = Tui::main_layout(&term.get_frame(), fullscreen, tui.showing_thumbnails);
 	to_renderer
 		.send(RenderNotif::Area(main_area.page_area))
 		.map_err(|e| {
@@ -485,7 +485,8 @@ async fn enter_redraw_loop(
 						InputAction::Rotate => to_renderer.send(RenderNotif::Rotate)?,
 						InputAction::Fullscreen => {
 							fullscreen = !fullscreen;
-							let new_area = Tui::main_layout(&term.get_frame(), fullscreen);
+							let new_area =
+								Tui::main_layout(&term.get_frame(), fullscreen, tui.showing_thumbnails);
 							main_area = new_area;
 							to_renderer.send(RenderNotif::Area(main_area.page_area))?;
 							needs_redraw = true;
@@ -527,7 +528,7 @@ async fn enter_redraw_loop(
 			},
 		};
 
-		let new_area = Tui::main_layout(&term.get_frame(), fullscreen);
+		let new_area = Tui::main_layout(&term.get_frame(), fullscreen, tui.showing_thumbnails);
 		if new_area != main_area {
 			main_area = new_area;
 			to_renderer.send(RenderNotif::Area(main_area.page_area))?;

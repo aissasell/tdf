@@ -372,21 +372,24 @@ impl Tui {
 	}
 
 	#[must_use]
-	pub fn main_layout(frame: &Frame<'_>, fullscreened: bool) -> RenderLayout {
+	pub fn main_layout(
+		frame: &Frame<'_>,
+		fullscreened: bool,
+		showing_thumbnails: bool
+	) -> RenderLayout {
 		if fullscreened {
 			RenderLayout {
 				page_area: frame.area(),
 				top_and_bottom: None
 			}
 		} else {
+			let bottom_height = if showing_thumbnails { 5 } else { 3 };
 			let layout = Layout::default()
 				.constraints([
 					Constraint::Length(3),
 					Constraint::Fill(1),
-					Constraint::Length(3)
+					Constraint::Length(bottom_height)
 				])
-				.horizontal_margin(2)
-				.vertical_margin(1)
 				.split(frame.area());
 
 			RenderLayout {
@@ -873,8 +876,8 @@ impl Tui {
 		file_thumbnails: &mut std::collections::HashMap<PathBuf, DynamicImage>,
 		picker: &Picker
 	) {
-		const THUMB_W: u16 = 4;
-		const THUMB_H: u16 = 2;
+		let thumb_h: u16 = area.height;
+		let thumb_w: u16 = area.height * 2;
 
 		let is_multi_page = rendered.len() > 1;
 		let total = if is_multi_page {
@@ -887,9 +890,15 @@ impl Tui {
 		let active = if is_multi_page { page_num } else { file_index };
 
 		let y = area.y;
-		let h = area.height.min(THUMB_H);
+		let h = thumb_h;
 
-		let active_img_x = area.x + (area.width.saturating_sub(THUMB_W)) / 2;
+		let active_img_x = area.x + (area.width.saturating_sub(thumb_w)) / 2;
+
+		let bar_left = "▌\n".repeat(h as usize);
+		let bar_right = "▐\n".repeat(h as usize);
+		let placeholder = format!("{}\n", "░".repeat(thumb_w as usize)).repeat(h as usize);
+		let arrow_left = "‹\n".repeat(h as usize);
+		let arrow_right = "›\n".repeat(h as usize);
 
 		let mut render_thumb = |frame: &mut Frame<'_>, i: usize, img_rect: Rect| {
 			let maybe_thumb = if is_multi_page {
@@ -912,7 +921,7 @@ impl Tui {
 				picker
 					.new_protocol(
 						img.clone(),
-						Size { width: THUMB_W, height: THUMB_H },
+						Size { width: thumb_w, height: thumb_h },
 						ratatui_image::Resize::Fit(None)
 					)
 					.ok()
@@ -922,7 +931,7 @@ impl Tui {
 				frame.render_widget(Image::new(protocol), img_rect);
 			} else {
 				frame.render_widget(
-					Paragraph::new("░░░░\n░░░░").style(Style::new().fg(Color::DarkGray)),
+					Paragraph::new(placeholder.as_str()).style(Style::new().fg(Color::DarkGray)),
 					img_rect
 				);
 			}
@@ -930,52 +939,52 @@ impl Tui {
 
 		if active_img_x > area.x {
 			frame.render_widget(
-				Paragraph::new("▌\n▌").style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+				Paragraph::new(bar_left.as_str()).style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
 				Rect { x: active_img_x - 1, y, width: 1, height: h }
 			);
 		}
 
-		let active_img_rect = Rect { x: active_img_x, y, width: THUMB_W, height: h };
+		let active_img_rect = Rect { x: active_img_x, y, width: thumb_w, height: h };
 		render_thumb(frame, active, active_img_rect);
 
-		if active_img_x + THUMB_W < area.x + area.width {
+		if active_img_x + thumb_w < area.x + area.width {
 			frame.render_widget(
-				Paragraph::new("▐\n▐").style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-				Rect { x: active_img_x + THUMB_W, y, width: 1, height: h }
+				Paragraph::new(bar_right.as_str()).style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+				Rect { x: active_img_x + thumb_w, y, width: 1, height: h }
 			);
 		}
 
 		let left_avail = (active_img_x.saturating_sub(1)).saturating_sub(area.x + 2);
-		let max_left = (left_avail / (THUMB_W + 1)) as usize;
+		let max_left = (left_avail / (thumb_w + 1)) as usize;
 		let left_count = max_left.min(active);
 
 		for k in 1..=left_count {
 			let i = active - k;
-			let x = active_img_x - 1 - (k as u16) * (THUMB_W + 1);
-			render_thumb(frame, i, Rect { x, y, width: THUMB_W, height: h });
+			let x = active_img_x - 1 - (k as u16) * (thumb_w + 1);
+			render_thumb(frame, i, Rect { x, y, width: thumb_w, height: h });
 		}
 
 		if active > left_count {
 			frame.render_widget(
-				Paragraph::new("‹\n‹").style(Style::new().fg(Color::DarkGray)),
+				Paragraph::new(arrow_left.as_str()).style(Style::new().fg(Color::DarkGray)),
 				Rect { x: area.x, y, width: 2, height: h }
 			);
 		}
 
-		let right_start = active_img_x + THUMB_W + 2;
+		let right_start = active_img_x + thumb_w + 2;
 		let right_avail = (area.x + area.width.saturating_sub(2)).saturating_sub(right_start);
-		let max_right = (right_avail / (THUMB_W + 1)) as usize;
+		let max_right = (right_avail / (thumb_w + 1)) as usize;
 		let right_count = max_right.min(total.saturating_sub(active + 1));
 
 		for k in 1..=right_count {
 			let i = active + k;
-			let x = right_start + ((k - 1) as u16) * (THUMB_W + 1);
-			render_thumb(frame, i, Rect { x, y, width: THUMB_W, height: h });
+			let x = right_start + ((k - 1) as u16) * (thumb_w + 1);
+			render_thumb(frame, i, Rect { x, y, width: thumb_w, height: h });
 		}
 
 		if active + 1 + right_count < total {
 			frame.render_widget(
-				Paragraph::new("›\n›").style(Style::new().fg(Color::DarkGray)),
+				Paragraph::new(arrow_right.as_str()).style(Style::new().fg(Color::DarkGray)),
 				Rect { x: area.x + area.width.saturating_sub(2), y, width: 2, height: h }
 			);
 		}
