@@ -378,9 +378,24 @@ impl Tui {
 		showing_thumbnails: bool
 	) -> RenderLayout {
 		if fullscreened {
-			RenderLayout {
-				page_area: frame.area(),
-				top_and_bottom: None
+			if showing_thumbnails {
+				let bottom_height = 5;
+				let layout = Layout::default()
+					.constraints([
+						Constraint::Fill(1),
+						Constraint::Length(bottom_height)
+					])
+					.split(frame.area());
+
+				RenderLayout {
+					page_area: layout[0],
+					top_and_bottom: Some((Rect::default(), layout[1]))
+				}
+			} else {
+				RenderLayout {
+					page_area: frame.area(),
+					top_and_bottom: None
+				}
 			}
 		} else {
 			let bottom_height = if showing_thumbnails { 5 } else { 3 };
@@ -1006,116 +1021,118 @@ impl Tui {
 		frame: &mut Frame<'_>,
 		bottom_msg: &BottomMessage
 	) {
-		// use the extra space here to add some padding to the right side
-		let page_nums_text = format!("{} / {} ", page_num + 1, rendered.len());
-		let doc_title = if total_files > 1 {
-			format!("[{}/{}] {}", file_index + 1, total_files, doc_name)
-		} else {
-			doc_name.to_string()
-		};
-
-		let top_block = Block::new()
-			// use this first title to add a bit of padding to the left side
-			.title_top(" ")
-			.title_top(Span::styled(&doc_title, Style::new().fg(Color::Cyan)))
-			.title_top(
-				Span::styled(&page_nums_text, Style::new().fg(Color::Cyan))
-					.into_right_aligned_line()
-			)
-			.padding(Padding {
-				bottom: 1,
-				..Padding::default()
-			})
-			.borders(Borders::BOTTOM);
-
-		frame.render_widget(top_block, top_area);
-
-		let bottom_block = if showing_thumbnails {
-			Block::new()
-				.padding(Padding {
-					top: 0,
-					right: 1,
-					left: 1,
-					bottom: 0
-				})
-				.borders(Borders::TOP)
-		} else {
-			Block::new()
-				.padding(Padding {
-					top: 1,
-					right: 2,
-					left: 2,
-					bottom: 0
-				})
-				.borders(Borders::TOP)
-		};
-		let bottom_inside_block = bottom_block.inner(bottom_area);
-
-		frame.render_widget(bottom_block, bottom_area);
-
-		if showing_thumbnails && !matches!(bottom_msg, BottomMessage::Input(_)) {
-			let folder_files = get_folder_files(folder_path, current_path);
-			Self::render_thumbnails_bar(
-				frame,
-				bottom_inside_block,
-				page_num,
-				rendered,
-				file_index,
-				total_files,
-				&folder_files,
-				file_thumbnails,
-				picker
-			);
-		} else {
-			let rendered_str = if !rendered.is_empty() {
-				format!(
-					"Rendered: {}%",
-					(rendered.iter().filter(|i| i.img.is_some()).count() * 100) / rendered.len()
-				)
+		if top_area.height > 0 {
+			let page_nums_text = format!("{} / {} ", page_num + 1, rendered.len());
+			let doc_title = if total_files > 1 {
+				format!("[{}/{}] {}", file_index + 1, total_files, doc_name)
 			} else {
-				String::new()
+				doc_name.to_string()
 			};
-			let bottom_layout = Layout::horizontal([
-				Constraint::Fill(1),
-				Constraint::Length(rendered_str.len() as u16)
-			])
-			.split(bottom_inside_block);
 
-			let rendered_span = Span::styled(&rendered_str, Style::new().fg(Color::Cyan));
-			frame.render_widget(rendered_span, bottom_layout[1]);
+			let top_block = Block::new()
+				// use this first title to add a bit of padding to the left side
+				.title_top(" ")
+				.title_top(Span::styled(&doc_title, Style::new().fg(Color::Cyan)))
+				.title_top(
+					Span::styled(&page_nums_text, Style::new().fg(Color::Cyan))
+						.into_right_aligned_line()
+				)
+				.padding(Padding {
+					bottom: 1,
+					..Padding::default()
+				})
+				.borders(Borders::BOTTOM);
 
-			let (msg_str, color): (Cow<'_, str>, _) = match bottom_msg {
-				BottomMessage::Help => ("?: Show help page".into(), Color::Blue),
-				BottomMessage::Error(e) => (e.as_str().into(), Color::Red),
-				BottomMessage::Input(input_state) => (
-					match input_state {
-						InputCommand::GoToPage(page) => format!("Go to: {page}"),
-						InputCommand::Search(s) => format!("Search: {s}")
-					}
-					.into(),
-					Color::Blue
-				),
-				BottomMessage::SearchResults(term) => {
-					let num_found = rendered.iter().filter_map(|r| r.num_results).sum::<usize>();
-					let num_searched =
-						rendered.iter().filter(|r| r.num_results.is_some()).count() * 100;
-					(
-						format!(
-							"Results for '{term}': {num_found} (searched: {}%)",
-							num_searched / rendered.len()
-						)
+			frame.render_widget(top_block, top_area);
+		}
+
+		if bottom_area.height > 0 {
+			let bottom_block = if showing_thumbnails {
+				Block::new()
+					.padding(Padding {
+						top: 0,
+						right: 1,
+						left: 1,
+						bottom: 0
+					})
+					.borders(Borders::TOP)
+			} else {
+				Block::new()
+					.padding(Padding {
+						top: 1,
+						right: 2,
+						left: 2,
+						bottom: 0
+					})
+					.borders(Borders::TOP)
+			};
+			let bottom_inside_block = bottom_block.inner(bottom_area);
+
+			frame.render_widget(bottom_block, bottom_area);
+
+			if showing_thumbnails && !matches!(bottom_msg, BottomMessage::Input(_)) {
+				let folder_files = get_folder_files(folder_path, current_path);
+				Self::render_thumbnails_bar(
+					frame,
+					bottom_inside_block,
+					page_num,
+					rendered,
+					file_index,
+					total_files,
+					&folder_files,
+					file_thumbnails,
+					picker
+				);
+			} else {
+				let rendered_str = if !rendered.is_empty() {
+					format!(
+						"Rendered: {}%",
+						(rendered.iter().filter(|i| i.img.is_some()).count() * 100) / rendered.len()
+					)
+				} else {
+					String::new()
+				};
+				let bottom_layout = Layout::horizontal([
+					Constraint::Fill(1),
+					Constraint::Length(rendered_str.len() as u16)
+				])
+				.split(bottom_inside_block);
+
+				let rendered_span = Span::styled(&rendered_str, Style::new().fg(Color::Cyan));
+				frame.render_widget(rendered_span, bottom_layout[1]);
+
+				let (msg_str, color): (Cow<'_, str>, _) = match bottom_msg {
+					BottomMessage::Help => ("?: Show help page".into(), Color::Blue),
+					BottomMessage::Error(e) => (e.as_str().into(), Color::Red),
+					BottomMessage::Input(input_state) => (
+						match input_state {
+							InputCommand::GoToPage(page) => format!("Go to: {page}"),
+							InputCommand::Search(s) => format!("Search: {s}")
+						}
 						.into(),
 						Color::Blue
-					)
-				}
-				BottomMessage::Reloaded => ("Document was reloaded!".into(), Color::Blue)
-			};
+					),
+					BottomMessage::SearchResults(term) => {
+						let num_found = rendered.iter().filter_map(|r| r.num_results).sum::<usize>();
+						let num_searched =
+							rendered.iter().filter(|r| r.num_results.is_some()).count() * 100;
+						(
+							format!(
+								"Results for '{term}': {num_found} (searched: {}%)",
+								num_searched / rendered.len()
+							)
+							.into(),
+							Color::Blue
+						)
+					}
+					BottomMessage::Reloaded => ("Document was reloaded!".into(), Color::Blue)
+				};
 
-			let span = Span::styled(msg_str, Style::new().fg(color));
-			frame.render_widget(span, bottom_layout[0]);
+				let msg_span = Span::styled(msg_str, Style::new().fg(color));
+				frame.render_widget(msg_span, bottom_layout[0]);
+			}
 		}
 	}
-
 	pub fn handle_event(&mut self, ev: &Event) -> Option<InputAction> {
 		fn jump_to_page(
 			page: &mut usize,
@@ -1159,6 +1176,7 @@ impl Tui {
 							'[' => self.navigate_file(false),
 							't' => {
 								self.showing_thumbnails = !self.showing_thumbnails;
+								self.last_render.rect = Rect::default();
 								Some(InputAction::Redraw)
 							}
 							'l' => self.change_page(PageChange::Next, ChangeAmount::Single),
