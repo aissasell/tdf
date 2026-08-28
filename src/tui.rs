@@ -364,6 +364,8 @@ impl Tui {
 		self.rendered.clear();
 		self.last_render = LastRender::default();
 		self.zoom = None;
+		self.bottom_msg = BottomMessage::Help;
+		self.prev_msg = None;
 
 		Some(InputAction::OpenFile(next_path))
 	}
@@ -1080,7 +1082,7 @@ impl Tui {
 
 		frame.render_widget(bottom_block, bottom_area);
 
-		if showing_thumbnails && matches!(bottom_msg, BottomMessage::Help | BottomMessage::Reloaded) {
+		if showing_thumbnails && !matches!(bottom_msg, BottomMessage::Input(_)) {
 			let folder_files = get_folder_files(folder_path, current_path);
 			Self::render_thumbnails_bar(
 				frame,
@@ -1143,10 +1145,18 @@ impl Tui {
 	}
 
 	pub fn handle_event(&mut self, ev: &Event) -> Option<InputAction> {
-		fn jump_to_page(page: &mut usize, rect: &mut Rect, new_page: usize) -> InputAction {
+		fn jump_to_page(
+			page: &mut usize,
+			rect: &mut Rect,
+			bottom_msg: &mut BottomMessage,
+			new_page: usize
+		) -> InputAction {
 			*page = new_page;
 			// Make sure we re-render
 			*rect = Rect::default();
+			if matches!(bottom_msg, BottomMessage::Error(_)) {
+				*bottom_msg = BottomMessage::Help;
+			}
 			InputAction::JumpingToPage(new_page)
 		}
 
@@ -1217,7 +1227,7 @@ impl Tui {
 										.then_some(self.page + 1 + idx)
 								})
 								.map(|next_page| {
-									jump_to_page(&mut self.page, &mut self.last_render.rect, next_page)
+									jump_to_page(&mut self.page, &mut self.last_render.rect, &mut self.bottom_msg, next_page)
 								}),
 							'N' if self.page > 0 => self.rendered[..(self.page)]
 								.iter()
@@ -1229,7 +1239,7 @@ impl Tui {
 										.then_some(self.page - (idx + 1))
 								})
 								.map(|prev_page| {
-									jump_to_page(&mut self.page, &mut self.last_render.rect, prev_page)
+									jump_to_page(&mut self.page, &mut self.last_render.rect, &mut self.bottom_msg, prev_page)
 								}),
 							'z' if key.modifiers.contains(KeyModifiers::CONTROL) => {
 								// [todo] better error handling here?
@@ -1434,6 +1444,10 @@ impl Tui {
 			// mark that we need to re-render the images
 			self.last_render.rect = Rect::default();
 			self.page = page;
+			if matches!(self.bottom_msg, BottomMessage::Error(_)) {
+				self.bottom_msg = BottomMessage::Help;
+				self.prev_msg = None;
+			}
 		}
 	}
 
