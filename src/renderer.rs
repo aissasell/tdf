@@ -122,38 +122,62 @@ pub fn start_rendering(
 		let path_arg = current_path.as_path();
 
 		let doc = match Document::open(path_arg) {
-			Err(e) => {
-				// if there's an error, tell the main loop
-				sender.send(Err(RenderError::Doc(e)))?;
-
-				match stored_doc {
-					Some(ref d) => d,
-					None => {
-						// then wait for a reload notif (since what probably happened is that the file was
-						// temporarily removed to facilitate a save or something like that)
-						while let Ok(msg) = receiver.recv() {
-							// and once that comes, just try to reload again
-							match msg {
-								RenderNotif::Reload => continue 'reload,
-								RenderNotif::OpenFile(new_path) => {
-									current_path = new_path;
-									stored_doc = None;
-									continue 'reload;
-								}
-								_ => ()
-							}
-						}
-						// if that while let Ok ever fails and we exit out of that loop, the main thread is
-						// done, so we're fine to just return
-						return Ok(());
-					}
-				}
-			}
 			Ok(d) => {
 				if stored_doc.is_some() {
 					sender.send(Ok(RenderInfo::Reloaded))?;
 				}
 				&*stored_doc.insert(d)
+			}
+			Err(e) => {
+				let fallback_doc = if let Ok(dyn_img) = image::open(&current_path) {
+					let mut png_bytes = Vec::new();
+					if dyn_img
+						.write_to(
+							&mut std::io::Cursor::new(&mut png_bytes),
+							image::ImageFormat::Png
+						)
+						.is_ok()
+					{
+						Document::from_bytes(&png_bytes, "png").ok()
+					} else {
+						None
+					}
+				} else {
+					None
+				};
+
+				if let Some(d) = fallback_doc {
+					if stored_doc.is_some() {
+						sender.send(Ok(RenderInfo::Reloaded))?;
+					}
+					&*stored_doc.insert(d)
+				} else {
+					// if there's an error, tell the main loop
+					sender.send(Err(RenderError::Doc(e)))?;
+
+					match stored_doc {
+						Some(ref d) => d,
+						None => {
+							// then wait for a reload notif (since what probably happened is that the file was
+							// temporarily removed to facilitate a save or something like that)
+							while let Ok(msg) = receiver.recv() {
+								// and once that comes, just try to reload again
+								match msg {
+									RenderNotif::Reload => continue 'reload,
+									RenderNotif::OpenFile(new_path) => {
+										current_path = new_path;
+										stored_doc = None;
+										continue 'reload;
+									}
+									_ => ()
+								}
+							}
+							// if that while let Ok ever fails and we exit out of that loop, the main thread is
+							// done, so we're fine to just return
+							return Ok(());
+						}
+					}
+				}
 			}
 		};
 

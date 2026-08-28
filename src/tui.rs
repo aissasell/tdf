@@ -850,6 +850,14 @@ impl Tui {
 
 	#[must_use]
 	pub fn load_file_thumbnail(path: &Path) -> Option<DynamicImage> {
+		if let Ok(img) = image::open(path) {
+			let min_dim = img.width().min(img.height());
+			if min_dim == 0 {
+				return None;
+			}
+			return Some(img.resize(128, 128, image::imageops::FilterType::Triangle));
+		}
+
 		#[cfg(windows)]
 		let path_arg = path.to_string_lossy();
 		#[cfg(unix)]
@@ -1667,5 +1675,29 @@ mod tests {
 		// If only one file exists or directory has no other files, navigation returns None
 		let res = tui.navigate_file(true);
 		assert!(res.is_none());
+	}
+
+	#[test]
+	fn test_open_webp() {
+		let temp_dir = std::env::temp_dir();
+		let webp_path = temp_dir.join("test_open.webp");
+		let img = image::RgbImage::new(10, 10);
+		img.save(&webp_path).unwrap();
+
+		let thumb = Tui::load_file_thumbnail(&webp_path);
+		assert!(thumb.is_some());
+
+		let img_loaded = image::open(&webp_path).unwrap();
+		let mut png_bytes = Vec::new();
+		img_loaded
+			.write_to(
+				&mut std::io::Cursor::new(&mut png_bytes),
+				image::ImageFormat::Png
+			)
+			.unwrap();
+
+		let doc_res = mupdf::Document::from_bytes(&png_bytes, "png");
+		let _ = std::fs::remove_file(&webp_path);
+		assert!(doc_res.is_ok(), "MuPDF open png bytes: {:?}", doc_res.err());
 	}
 }
