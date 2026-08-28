@@ -201,11 +201,13 @@ pub async fn run_conversion_loop(
 		match msg {
 			ConverterMsg::AddImg(img) => {
 				let page_num = img.page_num;
-				images[page_num] = Some(img);
+				if page_num < images.len() {
+					images[page_num] = Some(img);
+				}
 			}
 			ConverterMsg::NumPages(n_pages) => {
 				fill_default(images, n_pages);
-				*page = (*page).min(n_pages - 1);
+				*page = (*page).min(n_pages.saturating_sub(1));
 			}
 			ConverterMsg::GoToPage(new_page) => *page = new_page
 		}

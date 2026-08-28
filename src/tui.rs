@@ -1,4 +1,9 @@
-use std::{borrow::Cow, io::stdout, num::NonZeroUsize};
+use std::{
+	borrow::Cow,
+	io::stdout,
+	num::NonZeroUsize,
+	path::{Path, PathBuf}
+};
 
 use crossterm::{
 	event::{Event, KeyCode, KeyModifiers, MouseEventKind},
@@ -28,8 +33,115 @@ use crate::{
 	skip::Skip
 };
 
+#[must_use]
+pub fn is_supported_extension(path: &Path) -> bool {
+	let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+		return false;
+	};
+	let ext = ext.to_ascii_lowercase();
+	matches!(
+		ext.as_str(),
+		"pdf"
+			| "epub"
+			| "cbz"
+			| "xps"
+			| "oxps"
+			| "fb2"
+			| "svg"
+			| "png"
+			| "jpg"
+			| "jpeg"
+			| "jpe"
+			| "jfif"
+			| "webp"
+			| "gif"
+			| "bmp"
+			| "tiff"
+			| "tif"
+			| "pnm"
+			| "pbm"
+			| "pgm"
+			| "ppm"
+			| "pam"
+			| "tga"
+			| "ico"
+			| "heif"
+			| "heic"
+			| "avif"
+	)
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum KeyPart {
+	Str(String),
+	Num(u64)
+}
+
+fn natural_sort_key(s: &str) -> Vec<KeyPart> {
+	let mut parts = Vec::new();
+	let mut chars = s.chars().peekable();
+
+	while let Some(&c) = chars.peek() {
+		if c.is_ascii_digit() {
+			let mut num_str = String::new();
+			while let Some(&d) = chars.peek() {
+				if d.is_ascii_digit() {
+					num_str.push(d);
+					chars.next();
+				} else {
+					break;
+				}
+			}
+			if let Ok(n) = num_str.parse::<u64>() {
+				parts.push(KeyPart::Num(n));
+			} else {
+				parts.push(KeyPart::Str(num_str.to_ascii_lowercase()));
+			}
+		} else {
+			let mut s_part = String::new();
+			while let Some(&nc) = chars.peek() {
+				if !nc.is_ascii_digit() {
+					s_part.push(nc);
+					chars.next();
+				} else {
+					break;
+				}
+			}
+			parts.push(KeyPart::Str(s_part.to_ascii_lowercase()));
+		}
+	}
+	parts
+}
+
+#[must_use]
+pub fn get_folder_files(folder: &Path, current_file: &Path) -> Vec<PathBuf> {
+	let Ok(entries) = std::fs::read_dir(folder) else {
+		return vec![current_file.to_path_buf()];
+	};
+
+	let mut files: Vec<PathBuf> = entries
+		.filter_map(Result::ok)
+		.map(|e| e.path())
+		.filter(|p| p.is_file() && (is_supported_extension(p) || p == current_file))
+		.collect();
+
+	files.sort_by(|a, b| {
+		natural_sort_key(&a.to_string_lossy()).cmp(&natural_sort_key(&b.to_string_lossy()))
+	});
+
+	if files.is_empty() {
+		vec![current_file.to_path_buf()]
+	} else {
+		files
+	}
+}
+
 pub struct Tui {
 	name: String,
+	pub current_path: PathBuf,
+	pub folder_path: PathBuf,
+	pub file_index: usize,
+	pub total_files: usize,
 	pub page: usize,
 	last_render: LastRender,
 	bottom_msg: BottomMessage,
@@ -185,9 +297,24 @@ pub struct RenderLayout {
 
 impl Tui {
 	#[must_use]
-	pub fn new(name: String, max_wide: Option<NonZeroUsize>, r_to_l: bool, is_kitty: bool) -> Self {
+	pub fn new(
+		current_path: PathBuf,
+		folder_path: PathBuf,
+		file_index: usize,
+		total_files: usize,
+		max_wide: Option<NonZeroUsize>,
+		r_to_l: bool,
+		is_kitty: bool
+	) -> Self {
+		let name = current_path
+			.file_name()
+			.map_or_else(|| "Unknown file".into(), |n| n.to_string_lossy().to_string());
 		Self {
 			name,
+			current_path,
+			folder_path,
+			file_index,
+			total_files,
 			page: 0,
 			prev_msg: None,
 			bottom_msg: BottomMessage::Help,
@@ -198,6 +325,38 @@ impl Tui {
 			is_kitty,
 			zoom: None
 		}
+	}
+
+	pub fn navigate_file(&mut self, forward: bool) -> Option<InputAction> {
+		let files = get_folder_files(&self.folder_path, &self.current_path);
+		self.total_files = files.len();
+		if files.is_empty() {
+			return None;
+		}
+
+		let current_idx = files.iter().position(|p| p == &self.current_path).unwrap_or(0);
+		let next_idx = if forward {
+			(current_idx + 1) % files.len()
+		} else {
+			(current_idx + files.len() - 1) % files.len()
+		};
+
+		if next_idx == current_idx && files.len() == 1 {
+			return None;
+		}
+
+		let next_path = files[next_idx].clone();
+		self.current_path.clone_from(&next_path);
+		self.file_index = next_idx;
+		self.name = next_path
+			.file_name()
+			.map_or_else(|| "Unknown file".into(), |n| n.to_string_lossy().to_string());
+		self.page = 0;
+		self.rendered.clear();
+		self.last_render = LastRender::default();
+		self.zoom = None;
+
+		Some(InputAction::OpenFile(next_path))
 	}
 
 	#[must_use]
@@ -396,6 +555,8 @@ impl Tui {
 				self.page,
 				&self.rendered,
 				&self.name,
+				self.file_index,
+				self.total_files,
 				frame,
 				&self.bottom_msg
 			);
@@ -594,10 +755,14 @@ impl Tui {
 
 	pub fn set_n_pages(&mut self, n_pages: usize) {
 		fill_default(&mut self.rendered, n_pages);
-		self.page = self.page.min(n_pages - 1);
+		self.page = self.page.min(n_pages.saturating_sub(1));
 	}
 
 	pub fn page_ready(&mut self, img: ConvertedImage, page_num: usize, num_results: usize) {
+		if page_num >= self.rendered.len() {
+			return;
+		}
+
 		// If this new image woulda fit within the available space on the last render AND it's
 		// within the range where it might've been rendered with the last shown pages, then reset
 		// the last rect marker so that all images are forced to redraw on next render and this one
@@ -624,28 +789,40 @@ impl Tui {
 	}
 
 	pub fn page_failed_display(&mut self, page_num: usize) {
-		self.rendered[page_num].img = None;
+		if page_num < self.rendered.len() {
+			self.rendered[page_num].img = None;
+		}
 	}
 
 	pub fn got_num_results_on_page(&mut self, page_num: usize, num_results: usize) {
-		self.rendered[page_num].num_results = Some(num_results);
+		if page_num < self.rendered.len() {
+			self.rendered[page_num].num_results = Some(num_results);
+		}
 	}
 
+	#[expect(clippy::too_many_arguments)]
 	pub fn render_top_and_bottom(
 		(top_area, bottom_area): (Rect, Rect),
 		page_num: usize,
 		rendered: &[RenderedInfo],
 		doc_name: &str,
+		file_index: usize,
+		total_files: usize,
 		frame: &mut Frame<'_>,
 		bottom_msg: &BottomMessage
 	) {
 		// use the extra space here to add some padding to the right side
 		let page_nums_text = format!("{} / {} ", page_num + 1, rendered.len());
+		let doc_title = if total_files > 1 {
+			format!("[{}/{}] {}", file_index + 1, total_files, doc_name)
+		} else {
+			doc_name.to_string()
+		};
 
 		let top_block = Block::new()
 			// use this first title to add a bit of padding to the left side
 			.title_top(" ")
-			.title_top(Span::styled(doc_name, Style::new().fg(Color::Cyan)))
+			.title_top(Span::styled(&doc_title, Style::new().fg(Color::Cyan)))
 			.title_top(
 				Span::styled(&page_nums_text, Style::new().fg(Color::Cyan))
 					.into_right_aligned_line()
@@ -731,141 +908,143 @@ impl Tui {
 		match ev {
 			Event::Key(key) => {
 				match key.code {
-					KeyCode::Char(c)
-						if let BottomMessage::Input(InputCommand::Search(ref mut term)) =
-							self.bottom_msg =>
-					{
-						term.push(c);
-						InputAction::Redraw.into()
-					}
-					KeyCode::Char(c)
-						if let BottomMessage::Input(InputCommand::GoToPage(_)) =
-							self.bottom_msg && matches!(c, 'g' if self.is_kitty) =>
-					{
-						self.set_msg(MessageSetting::Pop);
-						self.update_zoom(Zoom::pan_bottom)
-					}
-					KeyCode::Char(c)
-						if let BottomMessage::Input(InputCommand::GoToPage(ref mut page)) =
-							self.bottom_msg =>
-						c.to_digit(10).map(|input_num| {
-							*page = (*page * 10) + input_num as usize;
-							InputAction::Redraw
-						}),
-					KeyCode::Char(c) => match c {
-						'l' => self.change_page(PageChange::Next, ChangeAmount::Single),
-						'j' => self.change_page(PageChange::Next, ChangeAmount::WholeScreen),
-						'h' => self.change_page(PageChange::Prev, ChangeAmount::Single),
-						'k' => self.change_page(PageChange::Prev, ChangeAmount::WholeScreen),
-						'q' => Some(InputAction::QuitApp),
-						'g' => {
-							self.set_msg(MessageSetting::Some(BottomMessage::Input(
-								InputCommand::GoToPage(0)
-							)));
-							Some(InputAction::Redraw)
+					KeyCode::Char(c) => match &mut self.bottom_msg {
+						BottomMessage::Input(InputCommand::Search(term)) => {
+							term.push(c);
+							InputAction::Redraw.into()
 						}
-						'/' => {
-							self.set_msg(MessageSetting::Some(BottomMessage::Input(
-								InputCommand::Search(String::new())
-							)));
-							Some(InputAction::Redraw)
+						BottomMessage::Input(InputCommand::GoToPage(_))
+							if c == 'g' && self.is_kitty =>
+						{
+							self.set_msg(MessageSetting::Pop);
+							self.update_zoom(Zoom::pan_bottom)
 						}
-						'i' => Some(InputAction::Invert),
-						'?' => {
-							self.showing_help_msg = true;
-							Some(InputAction::Redraw)
-						}
-						'f' => Some(InputAction::Fullscreen),
-						// TODO: If we can't find one, then maybe like block until we've verified
-						// all the pages have been checked?
-						'n' if self.page < self.rendered.len() - 1 => self.rendered
-							[(self.page + 1)..]
-							.iter()
-							.enumerate()
-							.find_map(|(idx, p)| {
-								p.num_results
-									.is_some_and(|num| num > 0)
-									.then_some(self.page + 1 + idx)
+						BottomMessage::Input(InputCommand::GoToPage(page)) => {
+							c.to_digit(10).map(|input_num| {
+								*page = (*page * 10) + input_num as usize;
+								InputAction::Redraw
 							})
-							.map(|next_page| {
-								jump_to_page(&mut self.page, &mut self.last_render.rect, next_page)
-							}),
-						'N' if self.page > 0 => self.rendered[..(self.page)]
-							.iter()
-							.rev()
-							.enumerate()
-							.find_map(|(idx, p)| {
-								p.num_results
-									.is_some_and(|num| num > 0)
-									.then_some(self.page - (idx + 1))
-							})
-							.map(|prev_page| {
-								jump_to_page(&mut self.page, &mut self.last_render.rect, prev_page)
-							}),
-						'z' if key.modifiers.contains(KeyModifiers::CONTROL) => {
-							// [todo] better error handling here?
+						}
+						_ => match c {
+							']' => self.navigate_file(true),
+							'[' => self.navigate_file(false),
+							'l' => self.change_page(PageChange::Next, ChangeAmount::Single),
+							'j' => self.change_page(PageChange::Next, ChangeAmount::WholeScreen),
+							'h' => self.change_page(PageChange::Prev, ChangeAmount::Single),
+							'k' => self.change_page(PageChange::Prev, ChangeAmount::WholeScreen),
+							'q' => Some(InputAction::QuitApp),
+							'g' => {
+								self.set_msg(MessageSetting::Some(BottomMessage::Input(
+									InputCommand::GoToPage(0)
+								)));
+								Some(InputAction::Redraw)
+							}
+							'/' => {
+								self.set_msg(MessageSetting::Some(BottomMessage::Input(
+									InputCommand::Search(String::new())
+								)));
+								Some(InputAction::Redraw)
+							}
+							'i' => Some(InputAction::Invert),
+							'?' => {
+								self.showing_help_msg = true;
+								Some(InputAction::Redraw)
+							}
+							'f' => Some(InputAction::Fullscreen),
+							// TODO: If we can't find one, then maybe like block until we've verified
+							// all the pages have been checked?
+							'n' if self.page < self.rendered.len().saturating_sub(1) => self.rendered
+								[(self.page + 1)..]
+								.iter()
+								.enumerate()
+								.find_map(|(idx, p)| {
+									p.num_results
+										.is_some_and(|num| num > 0)
+										.then_some(self.page + 1 + idx)
+								})
+								.map(|next_page| {
+									jump_to_page(&mut self.page, &mut self.last_render.rect, next_page)
+								}),
+							'N' if self.page > 0 => self.rendered[..(self.page)]
+								.iter()
+								.rev()
+								.enumerate()
+								.find_map(|(idx, p)| {
+									p.num_results
+										.is_some_and(|num| num > 0)
+										.then_some(self.page - (idx + 1))
+								})
+								.map(|prev_page| {
+									jump_to_page(&mut self.page, &mut self.last_render.rect, prev_page)
+								}),
+							'z' if key.modifiers.contains(KeyModifiers::CONTROL) => {
+								// [todo] better error handling here?
 
-							let mut backend = stdout();
-							execute!(
-								&mut backend,
-								LeaveAlternateScreen,
-								crossterm::cursor::Show,
-								crossterm::event::DisableMouseCapture
-							)
-							.unwrap();
-							disable_raw_mode().unwrap();
-
-							#[cfg(unix)]
-							{
-								// This process will hang after the SIGSTOP call until we get
-								// foregrounded again by something else, at which point we need to
-								// re-setup everything so that it all gets drawn again.
-								nix::sys::signal::kill(
-									nix::unistd::Pid::this(),
-									nix::sys::signal::Signal::SIGSTOP
+								let mut backend = stdout();
+								execute!(
+									&mut backend,
+									LeaveAlternateScreen,
+									crossterm::cursor::Show,
+									crossterm::event::DisableMouseCapture
 								)
 								.unwrap();
+								disable_raw_mode().unwrap();
+
+								#[cfg(unix)]
+								{
+									// This process will hang after the SIGSTOP call until we get
+									// foregrounded again by something else, at which point we need to
+									// re-setup everything so that it all gets drawn again.
+									nix::sys::signal::kill(
+										nix::unistd::Pid::this(),
+										nix::sys::signal::Signal::SIGSTOP
+									)
+									.unwrap();
+								}
+
+								enable_raw_mode().unwrap();
+								execute!(
+									&mut backend,
+									EnterAlternateScreen,
+									crossterm::cursor::Hide,
+									crossterm::event::EnableMouseCapture
+								)
+								.unwrap();
+
+								self.last_render.rect = Rect::default();
+								Some(InputAction::Redraw)
 							}
-
-							enable_raw_mode().unwrap();
-							execute!(
-								&mut backend,
-								EnterAlternateScreen,
-								crossterm::cursor::Hide,
-								crossterm::event::EnableMouseCapture
-							)
-							.unwrap();
-
-							self.last_render.rect = Rect::default();
-							Some(InputAction::Redraw)
+							'z' if self.is_kitty => {
+								let (zoom, f_or_f) = match self.zoom {
+									None => (Some(Zoom::default()), FitOrFill::Fill),
+									Some(_) => (None, FitOrFill::Fit)
+								};
+								self.zoom = zoom;
+								self.last_render.rect = Rect::default();
+								Some(InputAction::SwitchRenderZoom(f_or_f))
+							}
+							'o' if can_zoom => self.update_zoom(Zoom::step_in),
+							'O' if can_zoom => self.update_zoom(Zoom::step_out),
+							'L' if can_zoom => self.update_zoom(|z| z.pan(Direction::Right)),
+							'H' if can_zoom => self.update_zoom(|z| z.pan(Direction::Left)),
+							'J' if can_zoom => self.update_zoom(|z| z.pan(Direction::Down)),
+							'K' if can_zoom => self.update_zoom(|z| z.pan(Direction::Up)),
+							'G' if can_zoom => self.update_zoom(Zoom::pan_top),
+							'0' if can_zoom => self.update_zoom(Zoom::pan_left),
+							'$' if can_zoom => self.update_zoom(Zoom::pan_right),
+							'r' => Some(InputAction::Rotate),
+							_ => None
 						}
-						'z' if self.is_kitty => {
-							let (zoom, f_or_f) = match self.zoom {
-								None => (Some(Zoom::default()), FitOrFill::Fill),
-								Some(_) => (None, FitOrFill::Fit)
-							};
-							self.zoom = zoom;
-							self.last_render.rect = Rect::default();
-							Some(InputAction::SwitchRenderZoom(f_or_f))
-						}
-						'o' if can_zoom => self.update_zoom(Zoom::step_in),
-						'O' if can_zoom => self.update_zoom(Zoom::step_out),
-						'L' if can_zoom => self.update_zoom(|z| z.pan(Direction::Right)),
-						'H' if can_zoom => self.update_zoom(|z| z.pan(Direction::Left)),
-						'J' if can_zoom => self.update_zoom(|z| z.pan(Direction::Down)),
-						'K' if can_zoom => self.update_zoom(|z| z.pan(Direction::Up)),
-						'G' if can_zoom => self.update_zoom(Zoom::pan_top),
-						'0' if can_zoom => self.update_zoom(Zoom::pan_left),
-						'$' if can_zoom => self.update_zoom(Zoom::pan_right),
-						'r' => Some(InputAction::Rotate),
-						_ => None
 					},
-					KeyCode::Backspace
+					KeyCode::Backspace => {
 						if let BottomMessage::Input(InputCommand::Search(ref mut term)) =
-							self.bottom_msg =>
-					{
-						term.pop();
-						InputAction::Redraw.into()
+							self.bottom_msg
+						{
+							term.pop();
+							InputAction::Redraw.into()
+						} else {
+							None
+						}
 					}
 					KeyCode::Right => self.change_page(PageChange::Next, ChangeAmount::Single),
 					KeyCode::Down | KeyCode::PageDown =>
@@ -1092,6 +1271,8 @@ impl Tui {
 }
 
 static HELP_PAGE: &str = "\
+], [:
+    Next/Previous document or image in folder
 l, h, left, right:
     Go forward/backwards a single page
 j, k, down, up:
@@ -1131,6 +1312,7 @@ r:
 ";
 
 pub enum InputAction {
+	OpenFile(std::path::PathBuf),
 	Redraw,
 	JumpingToPage(usize),
 	Search(String),
@@ -1158,4 +1340,70 @@ pub enum MessageSetting {
 	Default,
 	Reset,
 	Pop
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_is_supported_extension() {
+		assert!(is_supported_extension(Path::new("test.pdf")));
+		assert!(is_supported_extension(Path::new("test.PDF")));
+		assert!(is_supported_extension(Path::new("test.png")));
+		assert!(is_supported_extension(Path::new("test.JPG")));
+		assert!(is_supported_extension(Path::new("test.jpeg")));
+		assert!(is_supported_extension(Path::new("test.webp")));
+		assert!(is_supported_extension(Path::new("test.svg")));
+		assert!(is_supported_extension(Path::new("test.epub")));
+		assert!(is_supported_extension(Path::new("test.cbz")));
+		assert!(!is_supported_extension(Path::new("test.txt")));
+		assert!(!is_supported_extension(Path::new("test.rs")));
+		assert!(!is_supported_extension(Path::new("test")));
+	}
+
+	#[test]
+	fn test_natural_sort_ordering() {
+		let mut files = vec![
+			PathBuf::from("img10.png"),
+			PathBuf::from("img1.png"),
+			PathBuf::from("img2.png"),
+			PathBuf::from("IMG3.png"),
+			PathBuf::from("img20.png"),
+		];
+
+		files.sort_by(|a, b| {
+			natural_sort_key(&a.to_string_lossy()).cmp(&natural_sort_key(&b.to_string_lossy()))
+		});
+
+		assert_eq!(
+			files,
+			vec![
+				PathBuf::from("img1.png"),
+				PathBuf::from("img2.png"),
+				PathBuf::from("IMG3.png"),
+				PathBuf::from("img10.png"),
+				PathBuf::from("img20.png"),
+			]
+		);
+	}
+
+	#[test]
+	fn test_navigate_file_single_file_returns_none() {
+		let temp_dir = std::env::temp_dir();
+		let current_path = temp_dir.join("single_test_doc.pdf");
+		let mut tui = Tui::new(
+			current_path,
+			temp_dir,
+			0,
+			1,
+			None,
+			false,
+			false
+		);
+
+		// If only one file exists or directory has no other files, navigation returns None
+		let res = tui.navigate_file(true);
+		assert!(res.is_none());
+	}
 }

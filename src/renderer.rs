@@ -14,6 +14,7 @@ const KITTY_MAX_W_OR_H: f32 = 10_000.0;
 
 #[derive(Debug)]
 pub enum RenderNotif {
+	OpenFile(std::path::PathBuf),
 	Area(Rect),
 	JumpToPage(usize),
 	PageNeedsReRender(usize),
@@ -105,6 +106,7 @@ pub fn start_rendering(
 	// And although the font size could theoretically change, we aren't accounting for that right
 	// now, so we just use the values passed in.
 
+	let mut current_path = path.to_path_buf();
 	let mut stored_doc = None;
 	let mut invert = false;
 	let mut rotate = RotateDirection::Deg0;
@@ -113,15 +115,13 @@ pub fn start_rendering(
 
 	let mut need_rerender = VecDeque::new();
 
-	#[cfg(windows)]
-	let path = path.to_string_lossy();
-
 	'reload: loop {
-		// Need to do this weird borrow thing so that we convert `Cow<'_, str>` -> `&str` on windows
-		// and keep unix a `&Path` -> `&Path` 'cause there are different requirements within mupdf
-		// about file paths per-platform
-		#[cfg_attr(unix, expect(clippy::borrow_deref_ref))]
-		let doc = match Document::open(&*path) {
+		#[cfg(windows)]
+		let path_arg = current_path.to_string_lossy();
+		#[cfg(unix)]
+		let path_arg = current_path.as_path();
+
+		let doc = match Document::open(path_arg) {
 			Err(e) => {
 				// if there's an error, tell the main loop
 				sender.send(Err(RenderError::Doc(e)))?;
@@ -133,8 +133,14 @@ pub fn start_rendering(
 						// temporarily removed to facilitate a save or something like that)
 						while let Ok(msg) = receiver.recv() {
 							// and once that comes, just try to reload again
-							if matches!(msg, RenderNotif::Reload) {
-								continue 'reload;
+							match msg {
+								RenderNotif::Reload => continue 'reload,
+								RenderNotif::OpenFile(new_path) => {
+									current_path = new_path;
+									stored_doc = None;
+									continue 'reload;
+								}
+								_ => ()
 							}
 						}
 						// if that while let Ok ever fails and we exit out of that loop, the main thread is
@@ -203,6 +209,12 @@ pub fn start_rendering(
 			macro_rules! handle_notif {
 				($notif:ident) => {{
 					match $notif {
+						RenderNotif::OpenFile(new_path) => {
+							current_path = new_path;
+							stored_doc = None;
+							need_rerender.clear();
+							continue 'reload;
+						}
 						RenderNotif::Reload => continue 'reload,
 						RenderNotif::Invert => {
 							invert = !invert;

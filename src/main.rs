@@ -135,9 +135,25 @@ async fn inner_main() -> Result<(), WrappedErr> {
 		));
 	};
 
-	let path = file
-		.canonicalize()
-		.map_err(|e| WrappedErr(format!("Cannot canonicalize provided file: {e}").into()))?;
+	let (path, folder_path) = if file.is_dir() {
+		let dir = file
+			.canonicalize()
+			.map_err(|e| WrappedErr(format!("Cannot canonicalize provided directory: {e}").into()))?;
+		let files = tdf::tui::get_folder_files(&dir, &dir);
+		let first = files
+			.first()
+			.ok_or_else(|| WrappedErr("No supported documents or images found in directory".into()))?;
+		(first.clone(), dir)
+	} else {
+		let path = file
+			.canonicalize()
+			.map_err(|e| WrappedErr(format!("Cannot canonicalize provided file: {e}").into()))?;
+		let folder = path
+			.parent()
+			.ok_or_else(|| WrappedErr("File has no parent directory".into()))?
+			.to_path_buf();
+		(path, folder)
+	};
 
 	if flags.terminal_colors && (flags.black_color.is_some() || flags.white_color.is_some()) {
 		return Err(WrappedErr(
@@ -205,12 +221,16 @@ async fn inner_main() -> Result<(), WrappedErr> {
 	let (render_tx, tui_rx) = flume::unbounded();
 	let watch_to_tui_tx = render_tx.clone();
 
+	let current_file_name = Arc::new(Mutex::new(
+		path.file_name()
+			.ok_or_else(|| WrappedErr("Path does not have a last component??".into()))?
+			.to_owned()
+	));
+
 	let mut watcher = notify::recommended_watcher(on_notify_ev(
 		watch_to_tui_tx,
 		watch_to_render_tx,
-		path.file_name()
-			.ok_or_else(|| WrappedErr("Path does not have a last component??".into()))?
-			.to_owned(),
+		current_file_name.clone(),
 		flags
 			.reload_delay
 			.map_or(DEFAULT_DEBOUNCE_DELAY, Duration::from_millis)
@@ -227,7 +247,7 @@ async fn inner_main() -> Result<(), WrappedErr> {
 	// we have to do this annoying workaround.
 	watcher
 		.watch(
-			path.parent().expect("The root directory is not a PDF"),
+			&folder_path,
 			RecursiveMode::NonRecursive
 		)
 		.map_err(|e| WrappedErr(format!("Can't watch the provided file: {e}").into()))?;
@@ -319,11 +339,18 @@ async fn inner_main() -> Result<(), WrappedErr> {
 		to_main, from_main, picker, 20, shms_work
 	));
 
-	let file_name = path.file_name().map_or_else(
-		|| "Unknown file".into(),
-		|n| n.to_string_lossy().to_string()
+	let folder_files = tdf::tui::get_folder_files(&folder_path, &path);
+	let file_index = folder_files.iter().position(|p| p == &path).unwrap_or(0);
+	let total_files = folder_files.len();
+	let tui = Tui::new(
+		path.clone(),
+		folder_path,
+		file_index,
+		total_files,
+		flags.max_wide,
+		flags.r_to_l,
+		is_kitty
 	);
-	let tui = Tui::new(file_name, flags.max_wide, flags.r_to_l, is_kitty);
 
 	let backend = CrosstermBackend::new(std::io::stdout());
 	let mut term = Terminal::new(backend).map_err(|e| {
@@ -374,7 +401,9 @@ async fn inner_main() -> Result<(), WrappedErr> {
 		tui,
 		&mut term,
 		main_area,
-		font_size
+		font_size,
+		current_file_name,
+		is_kitty
 	)
 	.await
 	.map_err(|e| {
@@ -402,7 +431,9 @@ async fn enter_redraw_loop(
 	mut tui: Tui,
 	term: &mut Terminal<CrosstermBackend<Stdout>>,
 	mut main_area: tdf::tui::RenderLayout,
-	font_size: FontSize
+	font_size: FontSize,
+	current_file_name: Arc<Mutex<OsString>>,
+	is_kitty: bool
 ) -> Result<(), Box<dyn Error>> {
 	let mut kitty_z_idx = i32::MIN;
 
@@ -418,6 +449,26 @@ async fn enter_redraw_loop(
 				match tui.handle_event(&ev) {
 					None => needs_redraw = false,
 					Some(action) => match action {
+						InputAction::OpenFile(next_path) => {
+							next_path
+								.file_name()
+								.unwrap_or_default()
+								.clone_into(&mut *current_file_name.lock().unwrap());
+							if is_kitty {
+								_ = run_action(
+									Action::Delete(DeleteConfig {
+										effect: ClearOrDelete::Delete,
+										which: WhichToDelete::IdRange(
+											NonZeroU32::new(1).unwrap()..=NonZeroU32::MAX
+										)
+									}),
+									&mut ev_stream
+								)
+								.await;
+							}
+							to_renderer.send(RenderNotif::OpenFile(next_path))?;
+							to_renderer.send(RenderNotif::Area(main_area.page_area))?;
+						}
 						InputAction::Redraw => (),
 						InputAction::QuitApp => return Ok(()),
 						InputAction::JumpingToPage(page) => {
@@ -518,7 +569,7 @@ async fn enter_redraw_loop(
 fn on_notify_ev(
 	to_tui_tx: flume::Sender<Result<RenderInfo, RenderError>>,
 	to_render_tx: flume::Sender<RenderNotif>,
-	file_name: OsString,
+	file_name: Arc<Mutex<OsString>>,
 	debounce_delay: Duration
 ) -> impl Fn(notify::Result<Event>) {
 	let last_event: Mutex<Result<(), RenderError>> = Mutex::new(Ok(()));
@@ -550,10 +601,11 @@ fn on_notify_ev(
 				// We only watch the parent directory (see the comment above `watcher.watch` in `fn
 				// main`) so we need to filter out events to only ones that pertain to the single file
 				// we care about
+				let curr_name = file_name.lock().unwrap().clone();
 				if !ev
 					.paths
 					.iter()
-					.any(|path| path.file_name().is_some_and(|f| f == file_name))
+					.any(|path| path.file_name().is_some_and(|f| f == curr_name))
 				{
 					return;
 				}
