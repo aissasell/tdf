@@ -18,7 +18,7 @@ use kittage::display::DisplayLocation;
 use ratatui::{
 	Frame,
 	layout::{Constraint, Flex, Layout, Position, Rect, Size},
-	prelude::{Line, Text},
+	prelude::Text,
 	style::{Color, Modifier, Style},
 	symbols::border,
 	text::Span,
@@ -1476,108 +1476,113 @@ impl Tui {
 		let frame_area = frame.area();
 		frame.render_widget(Clear, frame_area);
 
-		let block = Block::new()
-			.title("Help")
-			.padding(Padding::proportional(1))
-			.borders(Borders::ALL)
-			.border_set(border::ROUNDED)
-			.border_style(Color::Blue);
+		let outer_w = 100.min(frame_area.width.saturating_sub(2));
+		let outer_h = 25.min(frame_area.height.saturating_sub(2));
 
-		let help_sections = [
-			Text::from(HELP_PAGE),
-			// just some spacing
-			Text::from(""),
-			if self.is_kitty {
-				Text::from(KITTY_HELP)
-			} else {
-				Text::from("Not using kitty, kitty-specific keybindings hidden")
-					.style(Color::DarkGray)
-			}
-		];
-
-		let max_w: u16 = help_sections
-			.iter()
-			.flat_map(|section| section.lines.as_slice())
-			// We don't really need full unicode-width since we're using all ascii for the help
-			// pages, but this is the function they give us.
-			.map(Line::width)
-			.max()
-			.unwrap_or_default()
-			.try_into()
-			.expect("Every help text line must be shorter than u16::MAX");
-
-		let layout = Layout::horizontal([
+		let h_layout = Layout::horizontal([
 			Constraint::Fill(1),
-			Constraint::Length(max_w + 6),
+			Constraint::Length(outer_w),
 			Constraint::Fill(1)
 		])
 		.split(frame_area);
 
-		let block_area = Layout::vertical([
+		let v_layout = Layout::vertical([
 			Constraint::Fill(1),
-			Constraint::Length(
-				u16::try_from(help_sections.iter().map(|s| s.lines.len()).sum::<usize>()).unwrap()
-					+ 4
-			),
+			Constraint::Length(outer_h),
 			Constraint::Fill(1)
 		])
-		.split(layout[1]);
+		.split(h_layout[1]);
 
-		let mut block_inner = block.inner(block_area[1]);
+		let main_box = v_layout[1];
 
-		frame.render_widget(block, block_area[1]);
+		let outer_block = Block::new()
+			.title(" Help / Keybindings (? or Esc to close) ")
+			.borders(Borders::ALL)
+			.border_set(border::ROUNDED)
+			.border_style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
 
-		for section in help_sections {
-			let section_lines = section.lines.len();
-			let span = Paragraph::new(section).wrap(Wrap { trim: false });
-			frame.render_widget(span, block_inner);
-			block_inner.y += u16::try_from(section_lines).unwrap();
-		}
+		let inner_area = outer_block.inner(main_box);
+		frame.render_widget(outer_block, main_box);
+
+		let panes_layout = Layout::horizontal([
+			Constraint::Percentage(50),
+			Constraint::Percentage(50)
+		])
+		.split(inner_area);
+
+		let left_text = Text::from(HELP_LEFT_PANE);
+		let left_block = Block::new()
+			.title(" General Navigation ")
+			.borders(Borders::ALL)
+			.border_set(border::PLAIN)
+			.border_style(Color::DarkGray);
+		let left_inner = left_block.inner(panes_layout[0]);
+		frame.render_widget(left_block, panes_layout[0]);
+		frame.render_widget(Paragraph::new(left_text).wrap(Wrap { trim: false }), left_inner);
+
+		let right_text = if self.is_kitty {
+			Text::from(HELP_RIGHT_PANE_KITTY)
+		} else {
+			Text::from(HELP_RIGHT_PANE_NO_KITTY)
+		};
+		let right_block = Block::new()
+			.title(" Kitty Zoom & Pan ")
+			.borders(Borders::ALL)
+			.border_set(border::PLAIN)
+			.border_style(Color::DarkGray);
+		let right_inner = right_block.inner(panes_layout[1]);
+		frame.render_widget(right_block, panes_layout[1]);
+		frame.render_widget(Paragraph::new(right_text).wrap(Wrap { trim: false }), right_inner);
 	}
 }
 
-static HELP_PAGE: &str = "\
-], [:
-    Next/Previous document or image in folder
-l, h, left, right:
-    Go forward/backwards a single page
-j, k, down, up:
-    Go forwards/backwards a screen's worth of pages
-q, esc:
-    Quit
-g:
-    Go to specific page (type numbers after 'g')
-/:
-    Search
-n, N:
-    Next/Previous search result
-i:
-    Invert colors
-f:
-    Toggle fullscreen (hide/show top and bottom bars)
-t:
-    Toggle thumbnail preview in status bar
-?:
-    Show this page
-ctrl+z:
-    Suspend & background tdf \
-";
+static HELP_LEFT_PANE: &str = "\
+Navigation:
+  ] / [        Next / Prev file in folder
+  l / h        Next / Prev page
+  Left / Right Next / Prev page
+  j / k        Next / Prev screen of pages
+  Up / Down    Next / Prev screen of pages
+  g            Go to page (e.g. g 5 Enter)
 
-static KITTY_HELP: &str = "\
-When using Kitty Protocol:
-z:
-    Toggle between fill-screen and fit-screen
-o/O (when on fill-screen):
-    Zoom in and out, respectively
-gg/G (when on fill-screen):
-    Scroll to top/bottom of page
-H, J, K, L (when zoomed in):
-    Pan direction around page
-0/$ (when on fill-screen):
-    Scroll to left/right side of page
-r:
-		Rotate by 90 degrees
-";
+Search:
+  /            Search text in document
+  n / N        Next / Prev search result
+
+View & App:
+  f            Toggle fullscreen mode
+  t            Toggle thumbnail preview bar
+  i            Invert colors (dark / light)
+  ?            Toggle this help screen
+  q / Esc      Quit / Close help
+  Ctrl+Z       Suspend & background tdf";
+
+static HELP_RIGHT_PANE_KITTY: &str = "\
+Kitty Zoom & Fit:
+  z            Toggle Fill / Fit screen
+  o / O        Zoom in / out (fill mode)
+
+Panning in Zoom:
+  H, J, K, L   Pan Left, Down, Up, Right
+  0 / $        Pan to Left / Right edge
+  G            Pan to Top of page
+
+Rotation & Mouse:
+  r            Rotate clockwise by 90°
+  Scroll       Next / Prev page (or Pan)
+  Ctrl+Scroll  Zoom in / Zoom out
+  Shift+Scroll Horizontal pan";
+
+static HELP_RIGHT_PANE_NO_KITTY: &str = "\
+Kitty Protocol:
+  Not using Kitty graphics protocol.
+  Kitty-specific zoom & pan keybindings
+  are inactive in generic mode.
+
+Rotation & Mouse:
+  r            Rotate clockwise by 90°
+  Scroll       Next / Prev page
+  Shift+Scroll Horizontal page switch";
 
 pub enum InputAction {
 	OpenFile(std::path::PathBuf),
