@@ -130,15 +130,15 @@ pub fn start_rendering(
 			}
 			Err(e) => {
 				let fallback_doc = if let Ok(dyn_img) = image::open(&current_path) {
-					let mut png_bytes = Vec::new();
+					let mut pnm_bytes = Vec::new();
 					if dyn_img
 						.write_to(
-							&mut std::io::Cursor::new(&mut png_bytes),
-							image::ImageFormat::Png
+							&mut std::io::Cursor::new(&mut pnm_bytes),
+							image::ImageFormat::Pnm
 						)
 						.is_ok()
 					{
-						Document::from_bytes(&png_bytes, "png").ok()
+						Document::from_bytes(&pnm_bytes, "pnm").ok()
 					} else {
 						None
 					}

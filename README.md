@@ -1,6 +1,8 @@
 # `tdf`
 
 A terminal-based PDF viewer.
+This a fork from [`itsjunetime/tdf`](https://github.com/itsjunetime/tdf). I removed the outer padding and add thumbnails capability with navigation through files within a folder. After oppening a file navigate through the rest of the folder with "[" and "]". 
+"f" will make the preview fullscreen by hiding the top and bottom bar. Click "t" to show the thumbnails grid.
 
 Designed to be performant, very responsive, and work well with even very large PDFs. Built with [`ratatui`](https://github.com/ratatui-org/ratatui).
 
