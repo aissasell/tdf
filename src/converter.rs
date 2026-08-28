@@ -141,7 +141,7 @@ pub async fn run_conversion_loop(
 		};
 
 		let dyn_img_wrapper = DynamicImage::ImageRgb8(dyn_img);
-		let thumbnail = Some(dyn_img_wrapper.resize_to_fill(128, 128, image::imageops::FilterType::Triangle));
+		let thumbnail = Some(dyn_img_wrapper.thumbnail(128, 128));
 		let dyn_img = dyn_img_wrapper;
 
 		let txt_img = match picker.protocol_type() {

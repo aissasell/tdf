@@ -850,41 +850,44 @@ impl Tui {
 
 	#[must_use]
 	pub fn load_file_thumbnail(path: &Path) -> Option<DynamicImage> {
-		if let Ok(img) = image::open(path) {
-			let min_dim = img.width().min(img.height());
-			if min_dim == 0 {
-				return None;
-			}
-			return Some(img.resize(128, 128, image::imageops::FilterType::Triangle));
-		}
-
 		#[cfg(windows)]
 		let path_arg = path.to_string_lossy();
 		#[cfg(unix)]
 		let path_arg = path;
 
-		let doc = mupdf::Document::open(path_arg).ok()?;
-		let page = doc.load_page(0).ok()?;
-		let bounds = page.bounds().ok()?;
-		let w = bounds.x1 - bounds.x0;
-		let h = bounds.y1 - bounds.y0;
-		if w <= 0.0 || h <= 0.0 {
-			return None;
+		if let Ok(doc) = mupdf::Document::open(path_arg)
+			&& let Ok(page) = doc.load_page(0)
+			&& let Ok(bounds) = page.bounds()
+		{
+			let w = bounds.x1 - bounds.x0;
+			let h = bounds.y1 - bounds.y0;
+			if w > 0.0 && h > 0.0 {
+				let scale = 128.0 / w.max(h);
+				let mut ctm = mupdf::Matrix::new_translate(-bounds.x0, -bounds.y0);
+				ctm.concat(mupdf::Matrix::new_scale(scale, scale));
+
+				if let Ok(pixmap) = page.to_pixmap(&ctm, &mupdf::Colorspace::device_rgb(), false, false) {
+					let samples = pixmap.samples();
+					let pix_w = pixmap.width();
+					let pix_h = pixmap.height();
+					if pix_w > 0 && pix_h > 0
+						&& let Some(rgb_img) = image::RgbImage::from_raw(pix_w, pix_h, samples.to_vec())
+					{
+						return Some(DynamicImage::ImageRgb8(rgb_img));
+					}
+				}
+			}
 		}
 
-		let scale = 128.0 / w.max(h);
-		let mut ctm = mupdf::Matrix::new_translate(-bounds.x0, -bounds.y0);
-		ctm.concat(mupdf::Matrix::new_scale(scale, scale));
-
-		let pixmap = page.to_pixmap(&ctm, &mupdf::Colorspace::device_rgb(), false, false).ok()?;
-		let samples = pixmap.samples();
-		let pix_w = pixmap.width();
-		let pix_h = pixmap.height();
-		if pix_w == 0 || pix_h == 0 {
-			return None;
+		if let Ok(img) = image::open(path) {
+			let min_dim = img.width().min(img.height());
+			if min_dim == 0 {
+				return None;
+			}
+			return Some(img.thumbnail(128, 128));
 		}
-		let rgb_img = image::RgbImage::from_raw(pix_w, pix_h, samples.to_vec())?;
-		Some(DynamicImage::ImageRgb8(rgb_img))
+
+		None
 	}
 
 	#[expect(clippy::too_many_arguments)]
@@ -1693,16 +1696,16 @@ mod tests {
 		assert!(thumb.is_some());
 
 		let img_loaded = image::open(&webp_path).unwrap();
-		let mut png_bytes = Vec::new();
+		let mut pnm_bytes = Vec::new();
 		img_loaded
 			.write_to(
-				&mut std::io::Cursor::new(&mut png_bytes),
-				image::ImageFormat::Png
+				&mut std::io::Cursor::new(&mut pnm_bytes),
+				image::ImageFormat::Pnm
 			)
 			.unwrap();
 
-		let doc_res = mupdf::Document::from_bytes(&png_bytes, "png");
+		let doc_res = mupdf::Document::from_bytes(&pnm_bytes, "pnm");
 		let _ = std::fs::remove_file(&webp_path);
-		assert!(doc_res.is_ok(), "MuPDF open png bytes: {:?}", doc_res.err());
+		assert!(doc_res.is_ok(), "MuPDF open pnm bytes: {:?}", doc_res.err());
 	}
 }
