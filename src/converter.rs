@@ -155,15 +155,15 @@ pub async fn run_conversion_loop(
 
 		let dyn_img_wrapper = DynamicImage::ImageRgb8(dyn_img);
 		let thumb_img = dyn_img_wrapper
-			.resize_to_fill(4, 4, image::imageops::FilterType::Triangle)
+			.resize_to_fill(8, 4, image::imageops::FilterType::Lanczos3)
 			.to_rgb8();
 
 		let mut rows = Vec::with_capacity(2);
 		for r in 0..2 {
-			let mut row = Vec::with_capacity(4);
+			let mut row = Vec::with_capacity(8);
 			let y_top = (r * 2) as u32;
 			let y_bot = (r * 2 + 1) as u32;
-			for x in 0..4 {
+			for x in 0..8 {
 				let top = thumb_img.get_pixel(x, y_top).0;
 				let bot = thumb_img.get_pixel(x, y_bot).0;
 				row.push(HalfBlock {
@@ -174,7 +174,7 @@ pub async fn run_conversion_loop(
 			rows.push(row);
 		}
 		let thumbnail = MiniThumbnail {
-			width: 4,
+			width: 8,
 			height: 2,
 			rows
 		};

@@ -843,7 +843,7 @@ impl Tui {
 		let crop_x0 = bounds.x0 + (w - min_dim) / 2.0;
 		let crop_y0 = bounds.y0 + (h - min_dim) / 2.0;
 
-		let scale_x = 4.0 / min_dim;
+		let scale_x = 8.0 / min_dim;
 		let scale_y = 4.0 / min_dim;
 		let mut ctm = mupdf::Matrix::new_translate(-crop_x0, -crop_y0);
 		ctm.concat(mupdf::Matrix::new_scale(scale_x, scale_y));
@@ -858,10 +858,10 @@ impl Tui {
 
 		let mut rows = Vec::with_capacity(2);
 		for r in 0..2 {
-			let mut row = Vec::with_capacity(4);
+			let mut row = Vec::with_capacity(8);
 			let y_top = r * 2;
 			let y_bot = r * 2 + 1;
-			for x in 0..4 {
+			for x in 0..8 {
 				let sx = x.min(pix_w.saturating_sub(1));
 				let sy_top = y_top.min(pix_h.saturating_sub(1));
 				let sy_bot = y_bot.min(pix_h.saturating_sub(1));
@@ -883,7 +883,7 @@ impl Tui {
 		}
 
 		Some(MiniThumbnail {
-			width: 4,
+			width: 8,
 			height: 2,
 			rows
 		})
@@ -965,8 +965,8 @@ impl Tui {
 						}
 					}
 				} else {
-					line_row_0.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
-					line_row_1.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
+					line_row_0.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
+					line_row_1.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
 				}
 
 				line_row_0.push(Span::styled("▐", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
@@ -997,8 +997,8 @@ impl Tui {
 						}
 					}
 				} else {
-					line_row_0.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
-					line_row_1.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
+					line_row_0.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
+					line_row_1.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
 				}
 
 				line_row_0.push(Span::raw(" "));
