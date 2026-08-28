@@ -1201,7 +1201,10 @@ impl Tui {
 								self.showing_help_msg = true;
 								Some(InputAction::Redraw)
 							}
-							'f' => Some(InputAction::Fullscreen),
+							'f' => {
+								self.last_render.rect = Rect::default();
+								Some(InputAction::Fullscreen)
+							}
 							// TODO: If we can't find one, then maybe like block until we've verified
 							// all the pages have been checked?
 							'n' if self.page < self.rendered.len().saturating_sub(1) => self.rendered
@@ -1539,7 +1542,7 @@ n, N:
 i:
     Invert colors
 f:
-    Remove borders/fullscreen
+    Toggle fullscreen (hide/show top and bottom bars)
 t:
     Toggle thumbnail preview in status bar
 ?:
