@@ -16,18 +16,18 @@ use crossterm::{
 use kittage::display::DisplayLocation;
 use ratatui::{
 	Frame,
-	layout::{Constraint, Flex, Layout, Position, Rect},
+	layout::{Alignment, Constraint, Flex, Layout, Position, Rect},
 	prelude::{Line, Text},
-	style::{Color, Style},
+	style::{Color, Modifier, Style},
 	symbols::border,
 	text::Span,
 	widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap}
 };
-use ratatui_image::{FontSize, Image};
+use ratatui_image::{FontSize, Image, picker::Picker};
 
 use crate::{
 	FitOrFill,
-	converter::{ConvertedImage, MaybeTransferred},
+	converter::{ConvertedImage, HalfBlock, MaybeTransferred, MiniThumbnail},
 	kitty::{KittyDisplay, KittyReadyToDisplay},
 	renderer::{RenderError, fill_default},
 	skip::Skip
@@ -151,6 +151,9 @@ pub struct Tui {
 	rendered: Vec<RenderedInfo>,
 	page_constraints: PageConstraints,
 	showing_help_msg: bool,
+	pub showing_thumbnails: bool,
+	pub file_thumbnails: std::collections::HashMap<PathBuf, MiniThumbnail>,
+	pub picker: Picker,
 	is_kitty: bool,
 	zoom: Option<Zoom>
 }
@@ -286,7 +289,8 @@ pub struct RenderedInfo {
 	// we haven't checked this page yet
 	// Also this isn't the most efficient representation of this value, but it's accurate, so like
 	// whatever I guess
-	num_results: Option<usize>
+	num_results: Option<usize>,
+	pub thumbnail: Option<MiniThumbnail>
 }
 
 #[derive(PartialEq)]
@@ -296,6 +300,7 @@ pub struct RenderLayout {
 }
 
 impl Tui {
+	#[expect(clippy::too_many_arguments)]
 	#[must_use]
 	pub fn new(
 		current_path: PathBuf,
@@ -304,7 +309,8 @@ impl Tui {
 		total_files: usize,
 		max_wide: Option<NonZeroUsize>,
 		r_to_l: bool,
-		is_kitty: bool
+		is_kitty: bool,
+		picker: Picker
 	) -> Self {
 		let name = current_path
 			.file_name()
@@ -322,6 +328,9 @@ impl Tui {
 			rendered: vec![],
 			page_constraints: PageConstraints { max_wide, r_to_l },
 			showing_help_msg: false,
+			showing_thumbnails: false,
+			file_thumbnails: std::collections::HashMap::new(),
+			picker,
 			is_kitty,
 			zoom: None
 		}
@@ -557,6 +566,10 @@ impl Tui {
 				&self.name,
 				self.file_index,
 				self.total_files,
+				self.showing_thumbnails,
+				&self.folder_path,
+				&self.current_path,
+				&mut self.file_thumbnails,
 				frame,
 				&self.bottom_msg
 			);
@@ -758,9 +771,19 @@ impl Tui {
 		self.page = self.page.min(n_pages.saturating_sub(1));
 	}
 
-	pub fn page_ready(&mut self, img: ConvertedImage, page_num: usize, num_results: usize) {
+	pub fn page_ready(
+		&mut self,
+		img: ConvertedImage,
+		page_num: usize,
+		num_results: usize,
+		thumbnail: MiniThumbnail
+	) {
 		if page_num >= self.rendered.len() {
 			return;
+		}
+
+		if page_num == 0 {
+			self.file_thumbnails.insert(self.current_path.clone(), thumbnail.clone());
 		}
 
 		// If this new image woulda fit within the available space on the last render AND it's
@@ -784,7 +807,8 @@ impl Tui {
 		// number of pages, so the vec will already be cleared
 		self.rendered[page_num] = RenderedInfo {
 			img: Some(img),
-			num_results: Some(num_results)
+			num_results: Some(num_results),
+			thumbnail: Some(thumbnail)
 		};
 	}
 
@@ -800,6 +824,200 @@ impl Tui {
 		}
 	}
 
+	#[must_use]
+	pub fn load_file_mini_thumbnail(path: &Path) -> Option<MiniThumbnail> {
+		#[cfg(windows)]
+		let path_arg = path.to_string_lossy();
+		#[cfg(unix)]
+		let path_arg = path;
+
+		let doc = mupdf::Document::open(path_arg).ok()?;
+		let page = doc.load_page(0).ok()?;
+		let bounds = page.bounds().ok()?;
+		let w = bounds.x1 - bounds.x0;
+		let h = bounds.y1 - bounds.y0;
+		if w <= 0.0 || h <= 0.0 {
+			return None;
+		}
+		let min_dim = w.min(h);
+		let crop_x0 = bounds.x0 + (w - min_dim) / 2.0;
+		let crop_y0 = bounds.y0 + (h - min_dim) / 2.0;
+
+		let scale_x = 4.0 / min_dim;
+		let scale_y = 4.0 / min_dim;
+		let mut ctm = mupdf::Matrix::new_translate(-crop_x0, -crop_y0);
+		ctm.concat(mupdf::Matrix::new_scale(scale_x, scale_y));
+
+		let pixmap = page.to_pixmap(&ctm, &mupdf::Colorspace::device_rgb(), false, false).ok()?;
+		let samples = pixmap.samples();
+		let pix_w = pixmap.width() as usize;
+		let pix_h = pixmap.height() as usize;
+		if pix_w == 0 || pix_h == 0 {
+			return None;
+		}
+
+		let mut rows = Vec::with_capacity(2);
+		for r in 0..2 {
+			let mut row = Vec::with_capacity(4);
+			let y_top = r * 2;
+			let y_bot = r * 2 + 1;
+			for x in 0..4 {
+				let sx = x.min(pix_w.saturating_sub(1));
+				let sy_top = y_top.min(pix_h.saturating_sub(1));
+				let sy_bot = y_bot.min(pix_h.saturating_sub(1));
+				let top_idx = (sy_top * pix_w + sx) * 3;
+				let bot_idx = (sy_bot * pix_w + sx) * 3;
+				let top = if top_idx + 2 < samples.len() {
+					(samples[top_idx], samples[top_idx + 1], samples[top_idx + 2])
+				} else {
+					(255, 255, 255)
+				};
+				let bot = if bot_idx + 2 < samples.len() {
+					(samples[bot_idx], samples[bot_idx + 1], samples[bot_idx + 2])
+				} else {
+					(255, 255, 255)
+				};
+				row.push(HalfBlock { top, bot });
+			}
+			rows.push(row);
+		}
+
+		Some(MiniThumbnail {
+			width: 4,
+			height: 2,
+			rows
+		})
+	}
+
+	#[expect(clippy::too_many_arguments)]
+	fn render_thumbnails_bar(
+		frame: &mut Frame<'_>,
+		area: Rect,
+		page_num: usize,
+		rendered: &[RenderedInfo],
+		file_index: usize,
+		total_files: usize,
+		folder_files: &[PathBuf],
+		file_thumbnails: &mut std::collections::HashMap<PathBuf, MiniThumbnail>
+	) {
+		const MAX_BEFORE_AFTER: usize = 4;
+
+		let is_multi_page = rendered.len() > 1;
+		let total = if is_multi_page {
+			rendered.len()
+		} else if total_files > 1 {
+			total_files
+		} else {
+			1
+		};
+		let active = if is_multi_page { page_num } else { file_index };
+
+		let start = active.saturating_sub(MAX_BEFORE_AFTER);
+		let end = (active + MAX_BEFORE_AFTER + 1).min(total);
+
+		let mut line_row_0 = Vec::new();
+		let mut line_row_1 = Vec::new();
+
+		if start > 0 {
+			line_row_0.push(Span::styled("‹ ", Style::new().fg(Color::DarkGray)));
+			line_row_1.push(Span::raw("  "));
+		}
+
+		for i in start..end {
+			let maybe_thumb = if is_multi_page {
+				rendered.get(i).and_then(|r| r.thumbnail.as_ref())
+			} else if total_files > 1 {
+				let file_path = folder_files.get(i);
+				file_path.and_then(|p| {
+					if !file_thumbnails.contains_key(p) {
+						let th = Self::load_file_mini_thumbnail(p).unwrap_or_default();
+						file_thumbnails.insert(p.clone(), th);
+					}
+					file_thumbnails.get(p)
+				})
+			} else {
+				rendered.first().and_then(|r| r.thumbnail.as_ref())
+			};
+
+			if i == active {
+				line_row_0.push(Span::styled("▌", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+				line_row_1.push(Span::styled("▌", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+
+				if let Some(thumb) = maybe_thumb {
+					if let Some(r0) = thumb.rows.first() {
+						for hb in r0 {
+							line_row_0.push(Span::styled(
+								"▀",
+								Style::new()
+									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
+									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
+							));
+						}
+					}
+					if let Some(r1) = thumb.rows.get(1) {
+						for hb in r1 {
+							line_row_1.push(Span::styled(
+								"▀",
+								Style::new()
+									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
+									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
+							));
+						}
+					}
+				} else {
+					line_row_0.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
+					line_row_1.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
+				}
+
+				line_row_0.push(Span::styled("▐", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+				line_row_1.push(Span::styled("▐", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+			} else {
+				line_row_0.push(Span::raw(" "));
+				line_row_1.push(Span::raw(" "));
+
+				if let Some(thumb) = maybe_thumb {
+					if let Some(r0) = thumb.rows.first() {
+						for hb in r0 {
+							line_row_0.push(Span::styled(
+								"▀",
+								Style::new()
+									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
+									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
+							));
+						}
+					}
+					if let Some(r1) = thumb.rows.get(1) {
+						for hb in r1 {
+							line_row_1.push(Span::styled(
+								"▀",
+								Style::new()
+									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
+									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
+							));
+						}
+					}
+				} else {
+					line_row_0.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
+					line_row_1.push(Span::styled("░░░░", Style::new().fg(Color::DarkGray)));
+				}
+
+				line_row_0.push(Span::raw(" "));
+				line_row_1.push(Span::raw(" "));
+			}
+		}
+
+		if end < total {
+			line_row_0.push(Span::styled("›", Style::new().fg(Color::DarkGray)));
+			line_row_1.push(Span::raw(" "));
+		}
+
+		let text = Text::from(vec![Line::from(line_row_0), Line::from(line_row_1)]);
+		frame.render_widget(
+			Paragraph::new(text).alignment(Alignment::Center),
+			area
+		);
+	}
+
 	#[expect(clippy::too_many_arguments)]
 	pub fn render_top_and_bottom(
 		(top_area, bottom_area): (Rect, Rect),
@@ -808,6 +1026,10 @@ impl Tui {
 		doc_name: &str,
 		file_index: usize,
 		total_files: usize,
+		showing_thumbnails: bool,
+		folder_path: &Path,
+		current_path: &Path,
+		file_thumbnails: &mut std::collections::HashMap<PathBuf, MiniThumbnail>,
 		frame: &mut Frame<'_>,
 		bottom_msg: &BottomMessage
 	) {
@@ -835,64 +1057,89 @@ impl Tui {
 
 		frame.render_widget(top_block, top_area);
 
-		let bottom_block = Block::new()
-			.padding(Padding {
-				top: 1,
-				right: 2,
-				left: 2,
-				bottom: 0
-			})
-			.borders(Borders::TOP);
+		let bottom_block = if showing_thumbnails {
+			Block::new()
+				.padding(Padding {
+					top: 0,
+					right: 1,
+					left: 1,
+					bottom: 0
+				})
+				.borders(Borders::TOP)
+		} else {
+			Block::new()
+				.padding(Padding {
+					top: 1,
+					right: 2,
+					left: 2,
+					bottom: 0
+				})
+				.borders(Borders::TOP)
+		};
 		let bottom_inside_block = bottom_block.inner(bottom_area);
 
 		frame.render_widget(bottom_block, bottom_area);
 
-		let rendered_str = if !rendered.is_empty() {
-			format!(
-				"Rendered: {}%",
-				(rendered.iter().filter(|i| i.img.is_some()).count() * 100) / rendered.len()
-			)
+		if showing_thumbnails && matches!(bottom_msg, BottomMessage::Help | BottomMessage::Reloaded) {
+			let folder_files = get_folder_files(folder_path, current_path);
+			Self::render_thumbnails_bar(
+				frame,
+				bottom_inside_block,
+				page_num,
+				rendered,
+				file_index,
+				total_files,
+				&folder_files,
+				file_thumbnails
+			);
 		} else {
-			String::new()
-		};
-		let bottom_layout = Layout::horizontal([
-			Constraint::Fill(1),
-			Constraint::Length(rendered_str.len() as u16)
-		])
-		.split(bottom_inside_block);
+			let rendered_str = if !rendered.is_empty() {
+				format!(
+					"Rendered: {}%",
+					(rendered.iter().filter(|i| i.img.is_some()).count() * 100) / rendered.len()
+				)
+			} else {
+				String::new()
+			};
+			let bottom_layout = Layout::horizontal([
+				Constraint::Fill(1),
+				Constraint::Length(rendered_str.len() as u16)
+			])
+			.split(bottom_inside_block);
 
-		let rendered_span = Span::styled(&rendered_str, Style::new().fg(Color::Cyan));
-		frame.render_widget(rendered_span, bottom_layout[1]);
+			let rendered_span = Span::styled(&rendered_str, Style::new().fg(Color::Cyan));
+			frame.render_widget(rendered_span, bottom_layout[1]);
 
-		let (msg_str, color): (Cow<'_, str>, _) = match bottom_msg {
-			BottomMessage::Help => ("?: Show help page".into(), Color::Blue),
-			BottomMessage::Error(e) => (e.as_str().into(), Color::Red),
-			BottomMessage::Input(input_state) => (
-				match input_state {
-					InputCommand::GoToPage(page) => format!("Go to: {page}"),
-					InputCommand::Search(s) => format!("Search: {s}")
-				}
-				.into(),
-				Color::Blue
-			),
-			BottomMessage::SearchResults(term) => {
-				let num_found = rendered.iter().filter_map(|r| r.num_results).sum::<usize>();
-				let num_searched =
-					rendered.iter().filter(|r| r.num_results.is_some()).count() * 100;
-				(
-					format!(
-						"Results for '{term}': {num_found} (searched: {}%)",
-						num_searched / rendered.len()
-					)
+			let (msg_str, color): (Cow<'_, str>, _) = match bottom_msg {
+				BottomMessage::Help => ("?: Show help page".into(), Color::Blue),
+				BottomMessage::Error(e) => (e.as_str().into(), Color::Red),
+				BottomMessage::Input(input_state) => (
+					match input_state {
+						InputCommand::GoToPage(page) => format!("Go to: {page}"),
+						InputCommand::Search(s) => format!("Search: {s}")
+					}
 					.into(),
 					Color::Blue
-				)
-			}
-			BottomMessage::Reloaded => ("Document was reloaded!".into(), Color::Blue)
-		};
+				),
+				BottomMessage::SearchResults(term) => {
+					let num_found = rendered.iter().filter_map(|r| r.num_results).sum::<usize>();
+					let num_searched =
+						rendered.iter().filter(|r| r.num_results.is_some()).count() * 100;
+					(
+						format!(
+							"Results for '{term}': {num_found} (searched: {}%)",
+							num_searched / rendered.len()
+						)
+						.into(),
+						Color::Blue
+					)
+				}
+				BottomMessage::Reloaded => ("Document was reloaded!".into(), Color::Blue)
+			};
 
-		let span = Span::styled(msg_str, Style::new().fg(color));
-		frame.render_widget(span, bottom_layout[0]);
+			let span = Span::styled(msg_str, Style::new().fg(color));
+			frame.render_widget(span, bottom_layout[0]);
+		}
 	}
 
 	pub fn handle_event(&mut self, ev: &Event) -> Option<InputAction> {
@@ -928,6 +1175,10 @@ impl Tui {
 						_ => match c {
 							']' => self.navigate_file(true),
 							'[' => self.navigate_file(false),
+							't' => {
+								self.showing_thumbnails = !self.showing_thumbnails;
+								Some(InputAction::Redraw)
+							}
 							'l' => self.change_page(PageChange::Next, ChangeAmount::Single),
 							'j' => self.change_page(PageChange::Next, ChangeAmount::WholeScreen),
 							'h' => self.change_page(PageChange::Prev, ChangeAmount::Single),
@@ -1289,6 +1540,8 @@ i:
     Invert colors
 f:
     Remove borders/fullscreen
+t:
+    Toggle thumbnail preview in status bar
 ?:
     Show this page
 ctrl+z:
@@ -1399,7 +1652,9 @@ mod tests {
 			1,
 			None,
 			false,
-			false
+			false,
+			#[expect(deprecated)]
+			Picker::from_fontsize(FontSize { width: 8, height: 16 })
 		);
 
 		// If only one file exists or directory has no other files, navigation returns None

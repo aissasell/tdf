@@ -54,10 +54,24 @@ impl ConvertedImage {
 	}
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HalfBlock {
+	pub top: (u8, u8, u8),
+	pub bot: (u8, u8, u8)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MiniThumbnail {
+	pub width: u16,
+	pub height: u16,
+	pub rows: Vec<Vec<HalfBlock>>
+}
+
 pub struct ConvertedPage {
 	pub page: ConvertedImage,
 	pub num: usize,
-	pub num_results: usize
+	pub num_results: usize,
+	pub thumbnail: MiniThumbnail
 }
 
 pub enum ConverterMsg {
@@ -139,7 +153,32 @@ pub async fn run_conversion_loop(
 			height: page_info.img_data.cell_h
 		};
 
-		let dyn_img = DynamicImage::ImageRgb8(dyn_img);
+		let dyn_img_wrapper = DynamicImage::ImageRgb8(dyn_img);
+		let thumb_img = dyn_img_wrapper
+			.resize_to_fill(4, 4, image::imageops::FilterType::Triangle)
+			.to_rgb8();
+
+		let mut rows = Vec::with_capacity(2);
+		for r in 0..2 {
+			let mut row = Vec::with_capacity(4);
+			let y_top = (r * 2) as u32;
+			let y_bot = (r * 2 + 1) as u32;
+			for x in 0..4 {
+				let top = thumb_img.get_pixel(x, y_top).0;
+				let bot = thumb_img.get_pixel(x, y_bot).0;
+				row.push(HalfBlock {
+					top: top.into(),
+					bot: bot.into()
+				});
+			}
+			rows.push(row);
+		}
+		let thumbnail = MiniThumbnail {
+			width: 4,
+			height: 2,
+			rows
+		};
+		let dyn_img = dyn_img_wrapper;
 
 		let txt_img = match picker.protocol_type() {
 			ProtocolType::Kitty => {
@@ -193,7 +232,8 @@ pub async fn run_conversion_loop(
 		Ok(Some(ConvertedPage {
 			page: txt_img,
 			num: page_info.page_num,
-			num_results: page_info.result_rects.len()
+			num_results: page_info.result_rects.len(),
+			thumbnail
 		}))
 	}
 

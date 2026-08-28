@@ -336,7 +336,11 @@ async fn inner_main() -> Result<(), WrappedErr> {
 	let shms_work = is_kitty && do_shms_work(&mut ev_stream).await;
 
 	tokio::spawn(run_conversion_loop(
-		to_main, from_main, picker, 20, shms_work
+		to_main,
+		from_main,
+		picker.clone(),
+		20,
+		shms_work
 	));
 
 	let folder_files = tdf::tui::get_folder_files(&folder_path, &path);
@@ -349,7 +353,8 @@ async fn inner_main() -> Result<(), WrappedErr> {
 		total_files,
 		flags.max_wide,
 		flags.r_to_l,
-		is_kitty
+		is_kitty,
+		picker
 	);
 
 	let backend = CrosstermBackend::new(std::io::stdout());
@@ -505,8 +510,8 @@ async fn enter_redraw_loop(
 			}
 			Some(img_res) = from_converter.next() => {
 				match img_res {
-					Ok(ConvertedPage { page, num, num_results }) => {
-						tui.page_ready(page, num, num_results);
+					Ok(ConvertedPage { page, num, num_results, thumbnail }) => {
+						tui.page_ready(page, num, num_results, thumbnail);
 						if num == tui.page {
 							needs_redraw = true;
 						}
