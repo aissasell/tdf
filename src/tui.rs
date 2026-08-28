@@ -13,10 +13,11 @@ use crossterm::{
 		enable_raw_mode
 	}
 };
+use image::DynamicImage;
 use kittage::display::DisplayLocation;
 use ratatui::{
 	Frame,
-	layout::{Alignment, Constraint, Flex, Layout, Position, Rect},
+	layout::{Constraint, Flex, Layout, Position, Rect, Size},
 	prelude::{Line, Text},
 	style::{Color, Modifier, Style},
 	symbols::border,
@@ -27,7 +28,7 @@ use ratatui_image::{FontSize, Image, picker::Picker};
 
 use crate::{
 	FitOrFill,
-	converter::{ConvertedImage, HalfBlock, MaybeTransferred, MiniThumbnail},
+	converter::{ConvertedImage, MaybeTransferred},
 	kitty::{KittyDisplay, KittyReadyToDisplay},
 	renderer::{RenderError, fill_default},
 	skip::Skip
@@ -152,7 +153,7 @@ pub struct Tui {
 	page_constraints: PageConstraints,
 	showing_help_msg: bool,
 	pub showing_thumbnails: bool,
-	pub file_thumbnails: std::collections::HashMap<PathBuf, MiniThumbnail>,
+	pub file_thumbnails: std::collections::HashMap<PathBuf, DynamicImage>,
 	pub picker: Picker,
 	is_kitty: bool,
 	zoom: Option<Zoom>
@@ -290,7 +291,7 @@ pub struct RenderedInfo {
 	// Also this isn't the most efficient representation of this value, but it's accurate, so like
 	// whatever I guess
 	num_results: Option<usize>,
-	pub thumbnail: Option<MiniThumbnail>
+	pub thumbnail: Option<DynamicImage>
 }
 
 #[derive(PartialEq)]
@@ -572,6 +573,7 @@ impl Tui {
 				&self.folder_path,
 				&self.current_path,
 				&mut self.file_thumbnails,
+				&self.picker,
 				frame,
 				&self.bottom_msg
 			);
@@ -778,14 +780,16 @@ impl Tui {
 		img: ConvertedImage,
 		page_num: usize,
 		num_results: usize,
-		thumbnail: MiniThumbnail
+		thumbnail: Option<DynamicImage>
 	) {
 		if page_num >= self.rendered.len() {
 			return;
 		}
 
-		if page_num == 0 {
-			self.file_thumbnails.insert(self.current_path.clone(), thumbnail.clone());
+		if page_num == 0
+			&& let Some(th) = &thumbnail
+		{
+			self.file_thumbnails.insert(self.current_path.clone(), th.clone());
 		}
 
 		// If this new image woulda fit within the available space on the last render AND it's
@@ -810,7 +814,7 @@ impl Tui {
 		self.rendered[page_num] = RenderedInfo {
 			img: Some(img),
 			num_results: Some(num_results),
-			thumbnail: Some(thumbnail)
+			thumbnail
 		};
 	}
 
@@ -827,7 +831,7 @@ impl Tui {
 	}
 
 	#[must_use]
-	pub fn load_file_mini_thumbnail(path: &Path) -> Option<MiniThumbnail> {
+	pub fn load_file_thumbnail(path: &Path) -> Option<DynamicImage> {
 		#[cfg(windows)]
 		let path_arg = path.to_string_lossy();
 		#[cfg(unix)]
@@ -841,54 +845,20 @@ impl Tui {
 		if w <= 0.0 || h <= 0.0 {
 			return None;
 		}
-		let min_dim = w.min(h);
-		let crop_x0 = bounds.x0 + (w - min_dim) / 2.0;
-		let crop_y0 = bounds.y0 + (h - min_dim) / 2.0;
 
-		let scale_x = 8.0 / min_dim;
-		let scale_y = 4.0 / min_dim;
-		let mut ctm = mupdf::Matrix::new_translate(-crop_x0, -crop_y0);
-		ctm.concat(mupdf::Matrix::new_scale(scale_x, scale_y));
+		let scale = 128.0 / w.max(h);
+		let mut ctm = mupdf::Matrix::new_translate(-bounds.x0, -bounds.y0);
+		ctm.concat(mupdf::Matrix::new_scale(scale, scale));
 
 		let pixmap = page.to_pixmap(&ctm, &mupdf::Colorspace::device_rgb(), false, false).ok()?;
 		let samples = pixmap.samples();
-		let pix_w = pixmap.width() as usize;
-		let pix_h = pixmap.height() as usize;
+		let pix_w = pixmap.width();
+		let pix_h = pixmap.height();
 		if pix_w == 0 || pix_h == 0 {
 			return None;
 		}
-
-		let mut rows = Vec::with_capacity(2);
-		for r in 0..2 {
-			let mut row = Vec::with_capacity(8);
-			let y_top = r * 2;
-			let y_bot = r * 2 + 1;
-			for x in 0..8 {
-				let sx = x.min(pix_w.saturating_sub(1));
-				let sy_top = y_top.min(pix_h.saturating_sub(1));
-				let sy_bot = y_bot.min(pix_h.saturating_sub(1));
-				let top_idx = (sy_top * pix_w + sx) * 3;
-				let bot_idx = (sy_bot * pix_w + sx) * 3;
-				let top = if top_idx + 2 < samples.len() {
-					(samples[top_idx], samples[top_idx + 1], samples[top_idx + 2])
-				} else {
-					(255, 255, 255)
-				};
-				let bot = if bot_idx + 2 < samples.len() {
-					(samples[bot_idx], samples[bot_idx + 1], samples[bot_idx + 2])
-				} else {
-					(255, 255, 255)
-				};
-				row.push(HalfBlock { top, bot });
-			}
-			rows.push(row);
-		}
-
-		Some(MiniThumbnail {
-			width: 8,
-			height: 2,
-			rows
-		})
+		let rgb_img = image::RgbImage::from_raw(pix_w, pix_h, samples.to_vec())?;
+		Some(DynamicImage::ImageRgb8(rgb_img))
 	}
 
 	#[expect(clippy::too_many_arguments)]
@@ -900,9 +870,11 @@ impl Tui {
 		file_index: usize,
 		total_files: usize,
 		folder_files: &[PathBuf],
-		file_thumbnails: &mut std::collections::HashMap<PathBuf, MiniThumbnail>
+		file_thumbnails: &mut std::collections::HashMap<PathBuf, DynamicImage>,
+		picker: &Picker
 	) {
-		const MAX_BEFORE_AFTER: usize = 4;
+		const THUMB_W: u16 = 4;
+		const THUMB_H: u16 = 2;
 
 		let is_multi_page = rendered.len() > 1;
 		let total = if is_multi_page {
@@ -914,25 +886,20 @@ impl Tui {
 		};
 		let active = if is_multi_page { page_num } else { file_index };
 
-		let start = active.saturating_sub(MAX_BEFORE_AFTER);
-		let end = (active + MAX_BEFORE_AFTER + 1).min(total);
+		let y = area.y;
+		let h = area.height.min(THUMB_H);
 
-		let mut line_row_0 = Vec::new();
-		let mut line_row_1 = Vec::new();
+		let active_img_x = area.x + (area.width.saturating_sub(THUMB_W)) / 2;
 
-		if start > 0 {
-			line_row_0.push(Span::styled("‹ ", Style::new().fg(Color::DarkGray)));
-			line_row_1.push(Span::raw("  "));
-		}
-
-		for i in start..end {
+		let mut render_thumb = |frame: &mut Frame<'_>, i: usize, img_rect: Rect| {
 			let maybe_thumb = if is_multi_page {
 				rendered.get(i).and_then(|r| r.thumbnail.as_ref())
 			} else if total_files > 1 {
 				let file_path = folder_files.get(i);
 				file_path.and_then(|p| {
-					if !file_thumbnails.contains_key(p) {
-						let th = Self::load_file_mini_thumbnail(p).unwrap_or_default();
+					if !file_thumbnails.contains_key(p)
+						&& let Some(th) = Self::load_file_thumbnail(p)
+					{
 						file_thumbnails.insert(p.clone(), th);
 					}
 					file_thumbnails.get(p)
@@ -941,83 +908,77 @@ impl Tui {
 				rendered.first().and_then(|r| r.thumbnail.as_ref())
 			};
 
-			if i == active {
-				line_row_0.push(Span::styled("▌", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-				line_row_1.push(Span::styled("▌", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+			let maybe_protocol = maybe_thumb.and_then(|img| {
+				picker
+					.new_protocol(
+						img.clone(),
+						Size { width: THUMB_W, height: THUMB_H },
+						ratatui_image::Resize::Fit(None)
+					)
+					.ok()
+			});
 
-				if let Some(thumb) = maybe_thumb {
-					if let Some(r0) = thumb.rows.first() {
-						for hb in r0 {
-							line_row_0.push(Span::styled(
-								"▀",
-								Style::new()
-									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
-									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
-							));
-						}
-					}
-					if let Some(r1) = thumb.rows.get(1) {
-						for hb in r1 {
-							line_row_1.push(Span::styled(
-								"▀",
-								Style::new()
-									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
-									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
-							));
-						}
-					}
-				} else {
-					line_row_0.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
-					line_row_1.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
-				}
-
-				line_row_0.push(Span::styled("▐", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
-				line_row_1.push(Span::styled("▐", Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+			if let Some(protocol) = maybe_protocol.as_ref() {
+				frame.render_widget(Image::new(protocol), img_rect);
 			} else {
-				line_row_0.push(Span::raw(" "));
-				line_row_1.push(Span::raw(" "));
-
-				if let Some(thumb) = maybe_thumb {
-					if let Some(r0) = thumb.rows.first() {
-						for hb in r0 {
-							line_row_0.push(Span::styled(
-								"▀",
-								Style::new()
-									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
-									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
-							));
-						}
-					}
-					if let Some(r1) = thumb.rows.get(1) {
-						for hb in r1 {
-							line_row_1.push(Span::styled(
-								"▀",
-								Style::new()
-									.fg(Color::Rgb(hb.top.0, hb.top.1, hb.top.2))
-									.bg(Color::Rgb(hb.bot.0, hb.bot.1, hb.bot.2))
-							));
-						}
-					}
-				} else {
-					line_row_0.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
-					line_row_1.push(Span::styled("░░░░░░░░", Style::new().fg(Color::DarkGray)));
-				}
-
-				line_row_0.push(Span::raw(" "));
-				line_row_1.push(Span::raw(" "));
+				frame.render_widget(
+					Paragraph::new("░░░░\n░░░░").style(Style::new().fg(Color::DarkGray)),
+					img_rect
+				);
 			}
+		};
+
+		if active_img_x > area.x {
+			frame.render_widget(
+				Paragraph::new("▌\n▌").style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+				Rect { x: active_img_x - 1, y, width: 1, height: h }
+			);
 		}
 
-		if end < total {
-			line_row_0.push(Span::styled("›", Style::new().fg(Color::DarkGray)));
-			line_row_1.push(Span::raw(" "));
+		let active_img_rect = Rect { x: active_img_x, y, width: THUMB_W, height: h };
+		render_thumb(frame, active, active_img_rect);
+
+		if active_img_x + THUMB_W < area.x + area.width {
+			frame.render_widget(
+				Paragraph::new("▐\n▐").style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+				Rect { x: active_img_x + THUMB_W, y, width: 1, height: h }
+			);
 		}
 
-		let text = Text::from(vec![Line::from(line_row_0), Line::from(line_row_1)]);
-		frame.render_widget(
-			Paragraph::new(text).alignment(Alignment::Center),
-			area
-		);
+		let left_avail = (active_img_x.saturating_sub(1)).saturating_sub(area.x + 2);
+		let max_left = (left_avail / (THUMB_W + 1)) as usize;
+		let left_count = max_left.min(active);
+
+		for k in 1..=left_count {
+			let i = active - k;
+			let x = active_img_x - 1 - (k as u16) * (THUMB_W + 1);
+			render_thumb(frame, i, Rect { x, y, width: THUMB_W, height: h });
+		}
+
+		if active > left_count {
+			frame.render_widget(
+				Paragraph::new("‹\n‹").style(Style::new().fg(Color::DarkGray)),
+				Rect { x: area.x, y, width: 2, height: h }
+			);
+		}
+
+		let right_start = active_img_x + THUMB_W + 2;
+		let right_avail = (area.x + area.width.saturating_sub(2)).saturating_sub(right_start);
+		let max_right = (right_avail / (THUMB_W + 1)) as usize;
+		let right_count = max_right.min(total.saturating_sub(active + 1));
+
+		for k in 1..=right_count {
+			let i = active + k;
+			let x = right_start + ((k - 1) as u16) * (THUMB_W + 1);
+			render_thumb(frame, i, Rect { x, y, width: THUMB_W, height: h });
+		}
+
+		if active + 1 + right_count < total {
+			frame.render_widget(
+				Paragraph::new("›\n›").style(Style::new().fg(Color::DarkGray)),
+				Rect { x: area.x + area.width.saturating_sub(2), y, width: 2, height: h }
+			);
+		}
 	}
 
 	#[expect(clippy::too_many_arguments)]
@@ -1031,7 +992,8 @@ impl Tui {
 		showing_thumbnails: bool,
 		folder_path: &Path,
 		current_path: &Path,
-		file_thumbnails: &mut std::collections::HashMap<PathBuf, MiniThumbnail>,
+		file_thumbnails: &mut std::collections::HashMap<PathBuf, DynamicImage>,
+		picker: &Picker,
 		frame: &mut Frame<'_>,
 		bottom_msg: &BottomMessage
 	) {
@@ -1092,7 +1054,8 @@ impl Tui {
 				file_index,
 				total_files,
 				&folder_files,
-				file_thumbnails
+				file_thumbnails,
+				picker
 			);
 		} else {
 			let rendered_str = if !rendered.is_empty() {
