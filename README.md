@@ -18,7 +18,7 @@ Designed to be performant, very responsive, and work well with even very large P
 ## Installation
 
 1. Get the rust toolchain from [rustup.rs](https://rustup.rs)
-2. Run `cargo install --git https://github.com/itsjunetime/tdf.git`
+2. Run `cargo install --git https://github.com/aissasell/tdf.git`
 
 If you want to use this with `epub`s or `cbz`s, add `--features epub` or `--features cbz` to the command line (or `--features cbz,epub` for both)
 
